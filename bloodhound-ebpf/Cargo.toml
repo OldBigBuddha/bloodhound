@@ -1,0 +1,15 @@
+[package]
+name = "bloodhound-ebpf"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+
+[[bin]]
+name = "bloodhound-ebpf"
+path = "src/main.rs"
+
+[dependencies]
+aya-ebpf = "0.1"
+aya-log-ebpf = "0.1"
+bloodhound-common = { path = "../bloodhound-common" }
+

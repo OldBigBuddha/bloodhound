@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = ["bloodhound", "bloodhound-common", "bloodhound-ebpf", "bloodhound-tui"]
+
+[workspace.package]
+license = "Apache-2.0"
+
+[workspace.dependencies]
+bloodhound-common = { path = "bloodhound-common" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.dev.package.bloodhound-ebpf]
+opt-level = 3
+debug = false
+debug-assertions = false
+overflow-checks = false
+codegen-units = 1
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"

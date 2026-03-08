@@ -1,0 +1,26 @@
+---
+source: bloodhound/src/deserializer.rs
+assertion_line: 1458
+expression: to_json(&event)
+---
+{
+  "args": {
+    "fd": 3,
+    "fd_type": "regular",
+    "requested_size": 4096
+  },
+  "event": {
+    "layer": "behavior",
+    "name": "read",
+    "type": "TRACEPOINT"
+  },
+  "header": {
+    "auid": 1000,
+    "comm": "bash",
+    "pid": 5678,
+    "ppid": 1234,
+    "sessionid": 42,
+    "timestamp": 1709.0
+  },
+  "return_code": 1024
+}

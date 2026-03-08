@@ -1,0 +1,27 @@
+---
+source: bloodhound/src/deserializer.rs
+assertion_line: 1606
+expression: to_json(&event)
+---
+{
+  "args": {
+    "new_gid": 0,
+    "new_uid": 0,
+    "old_gid": 1000,
+    "old_uid": 1000
+  },
+  "event": {
+    "layer": "behavior",
+    "name": "task_fix_setuid",
+    "type": "LSM"
+  },
+  "header": {
+    "auid": 1000,
+    "comm": "bash",
+    "pid": 5678,
+    "ppid": 1234,
+    "sessionid": 42,
+    "timestamp": 1709.0
+  },
+  "return_code": 0
+}

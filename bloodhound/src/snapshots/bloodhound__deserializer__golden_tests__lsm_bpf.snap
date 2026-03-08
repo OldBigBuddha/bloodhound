@@ -1,0 +1,24 @@
+---
+source: bloodhound/src/deserializer.rs
+assertion_line: 1591
+expression: to_json(&event)
+---
+{
+  "args": {
+    "cmd": 5
+  },
+  "event": {
+    "layer": "behavior",
+    "name": "bpf",
+    "type": "LSM"
+  },
+  "header": {
+    "auid": 1000,
+    "comm": "bash",
+    "pid": 5678,
+    "ppid": 1234,
+    "sessionid": 42,
+    "timestamp": 1709.0
+  },
+  "return_code": -1
+}

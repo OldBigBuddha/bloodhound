@@ -1,0 +1,32 @@
+---
+source: bloodhound/src/deserializer.rs
+assertion_line: 1422
+expression: to_json(&event)
+---
+{
+  "args": {
+    "raw_args": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "syscall_nr": 39
+  },
+  "event": {
+    "layer": "behavior",
+    "name": "39",
+    "type": "SYSCALL"
+  },
+  "header": {
+    "auid": 1000,
+    "comm": "bash",
+    "pid": 5678,
+    "ppid": 1234,
+    "sessionid": 42,
+    "timestamp": 1709.0
+  },
+  "return_code": 5678
+}

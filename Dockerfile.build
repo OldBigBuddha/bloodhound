@@ -1,0 +1,73 @@
+# syntax=docker/dockerfile:1
+# Multi-stage build for bloodhound eBPF tracing daemon
+# Produces a statically-linked x86_64-unknown-linux-musl binary
+
+# ── Stage 1: toolchain ──────────────────────────────────────────────
+FROM --platform=linux/amd64 ubuntu:24.04 AS toolchain
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    build-essential \
+    llvm-15-dev \
+    llvm-15-tools \
+    libclang-15-dev \
+    libpolly-15-dev \
+    musl-tools \
+    pkg-config \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# .cargo/config.toml expects x86_64-linux-musl-gcc
+RUN ln -s /usr/bin/musl-gcc /usr/local/bin/x86_64-linux-musl-gcc
+
+# Install Rust nightly via rustup
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --default-toolchain nightly --component rust-src --target x86_64-unknown-linux-musl
+
+ENV PATH="/usr/lib/llvm-15/bin:/root/.cargo/bin:${PATH}"
+ENV LLVM_SYS_150_PREFIX=/usr/lib/llvm-15
+
+# Install pre-compiled bpf-linker to avoid LLVM sys linking issues (use GNU target for Ubuntu base)
+RUN curl -L https://github.com/aya-rs/bpf-linker/releases/download/v0.10.2/bpf-linker-x86_64-unknown-linux-gnu.tar.gz | \
+    tar -xz -C /root/.cargo/bin bpf-linker
+
+# ── Stage 2: build ──────────────────────────────────────────────────
+FROM toolchain AS build
+
+WORKDIR /src
+
+# Copy dependency manifests first for layer caching
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY .cargo/ .cargo/
+
+# Copy crate manifests (needed for cargo fetch to resolve workspace)
+COPY bloodhound/Cargo.toml bloodhound/Cargo.toml
+COPY bloodhound-common/Cargo.toml bloodhound-common/Cargo.toml
+COPY bloodhound-ebpf/Cargo.toml bloodhound-ebpf/Cargo.toml
+COPY bloodhound-tui/Cargo.toml bloodhound-tui/Cargo.toml
+
+# Create dummy source files so cargo fetch can resolve the workspace
+RUN mkdir -p bloodhound/src bloodhound-common/src bloodhound-ebpf/src bloodhound-tui/src && \
+    echo "fn main() {}" > bloodhound/src/main.rs && \
+    echo "" > bloodhound-common/src/lib.rs && \
+    echo "#![no_std] #![no_main]" > bloodhound-ebpf/src/main.rs && \
+    echo "fn main() {}" > bloodhound-tui/src/main.rs
+
+RUN cargo fetch --locked
+
+# Remove dummy sources, copy real source code
+RUN rm -rf bloodhound/src bloodhound-common/src bloodhound-ebpf/src bloodhound-tui/src
+COPY bloodhound/ bloodhound/
+COPY bloodhound-common/ bloodhound-common/
+COPY bloodhound-ebpf/ bloodhound-ebpf/
+COPY bloodhound-tui/ bloodhound-tui/
+
+RUN cargo build --package bloodhound --release --target x86_64-unknown-linux-musl --verbose
+
+# ── Stage 3: output ─────────────────────────────────────────────────
+FROM scratch AS output
+
+COPY --from=build /src/target/x86_64-unknown-linux-musl/release/bloodhound /bloodhound

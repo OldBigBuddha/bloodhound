@@ -1,0 +1,118 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "BehaviorEvent Schema",
+  "description": "Schema for internal behavioral events captured by the eBPF tracing daemon.",
+  "type": "object",
+  "required": ["header", "event"],
+  "properties": {
+    "header": {
+      "type": "object",
+      "description": "Correlation metadata shared across all layers.",
+      "required": ["timestamp", "auid", "sessionid", "pid", "comm"],
+      "properties": {
+        "timestamp": {
+          "type": "number",
+          "description": "Event timestamp in seconds since epoch (float for precision)."
+        },
+        "auid": {
+          "type": "integer",
+          "description": "Audit User ID (Login UID). Remains constant across privilege escalations."
+        },
+        "sessionid": {
+          "type": "integer",
+          "description": "Audit Session ID assigned by the kernel at login."
+        },
+        "pid": {
+          "type": "integer",
+          "description": "Process ID that triggered the event."
+        },
+        "ppid": {
+          "type": "integer",
+          "description": "Parent Process ID."
+        },
+        "comm": {
+          "type": "string",
+          "description": "The command name of the process."
+        }
+      }
+    },
+    "event": {
+      "type": "object",
+      "description": "Classification of the captured behavior.",
+      "required": ["type", "name", "layer"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["SYSCALL", "TTY", "PACKET", "KPROBE", "TRACEPOINT", "LSM"],
+          "description": "The source/nature of the event."
+        },
+        "name": {
+          "type": "string",
+          "description": "Specific name of the hook point (e.g., 'openat', 'tty_write')."
+        },
+        "layer": {
+          "type": "string",
+          "enum": ["intent", "tooling", "behavior"],
+          "description": "The abstraction layer this event belongs to."
+        }
+      }
+    },
+    "proc": {
+      "type": "object",
+      "description": "Process context at the time of the event.",
+      "properties": {
+        "main_executable": {
+          "type": "string",
+          "description": "Absolute path to the binary being executed."
+        },
+        "cwd": {
+          "type": "string",
+          "description": "Current working directory of the process."
+        },
+        "tty": {
+          "type": "string",
+          "description": "Associated TTY device path."
+        }
+      }
+    },
+    "args": {
+      "type": "object",
+      "description": "Extracted arguments or payload of the event. Fields vary by event type.",
+      "properties": {
+        "filename": { "type": "string" },
+        "argv": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "flags": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "data": {
+          "type": "string",
+          "description": "Base64-encoded raw bytes (used for TTY input/output)."
+        },
+        "fd_type": {
+          "type": "string",
+          "enum": ["regular", "pipe", "socket", "tty", "other"],
+          "description": "File descriptor type classification (used for read/write events)."
+        },
+        "syscall_nr": {
+          "type": "integer",
+          "description": "Syscall number (used for SYSCALL type Tier 1 raw events)."
+        },
+        "raw_args": {
+          "type": "array",
+          "items": { "type": "integer" },
+          "maxItems": 6,
+          "description": "Raw syscall arguments as integers (used for SYSCALL type Tier 1 raw events)."
+        }
+      },
+      "additionalProperties": true
+    },
+    "return_code": {
+      "type": "integer",
+      "description": "Exit code or return value of the syscall/operation."
+    }
+  }
+}

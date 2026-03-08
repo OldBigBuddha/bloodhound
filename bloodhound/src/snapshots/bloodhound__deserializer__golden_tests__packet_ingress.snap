@@ -1,0 +1,23 @@
+---
+source: bloodhound/src/deserializer.rs
+assertion_line: 1643
+expression: to_json(&event)
+---
+{
+  "args": {
+    "data": "RQAAPA==",
+    "ifindex": 2
+  },
+  "event": {
+    "layer": "behavior",
+    "name": "ingress",
+    "type": "PACKET"
+  },
+  "header": {
+    "auid": 0,
+    "comm": "",
+    "pid": 0,
+    "sessionid": 0,
+    "timestamp": 1709.0
+  }
+}

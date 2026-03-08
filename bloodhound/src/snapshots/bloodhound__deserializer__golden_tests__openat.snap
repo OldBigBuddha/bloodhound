@@ -1,0 +1,29 @@
+---
+source: bloodhound/src/deserializer.rs
+assertion_line: 1441
+expression: to_json(&event)
+---
+{
+  "args": {
+    "filename": "/etc/passwd",
+    "flags": [
+      "O_RDWR",
+      "O_CREAT"
+    ],
+    "mode": 420
+  },
+  "event": {
+    "layer": "behavior",
+    "name": "openat",
+    "type": "TRACEPOINT"
+  },
+  "header": {
+    "auid": 1000,
+    "comm": "bash",
+    "pid": 5678,
+    "ppid": 1234,
+    "sessionid": 42,
+    "timestamp": 1709.0
+  },
+  "return_code": 3
+}
