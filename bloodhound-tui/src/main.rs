@@ -18,9 +18,9 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 
-use app::App;
+use app::{App, ExecChild};
 use command_reconstructor::reconstruct_commands;
-use correlator::correlate;
+use correlator::{correlate, CommandGroup};
 use event_model::BehaviorEvent;
 
 const FILE_SIZE_WARNING_BYTES: u64 = 50 * 1024 * 1024; // 50 MB
@@ -137,6 +137,9 @@ fn main() -> Result<()> {
     // and decode it into printable text lines.
     let tty_output = build_tty_output(&groups, &events);
 
+    // Build execve process trees per command group.
+    let exec_trees = build_exec_trees(&groups, &events);
+
     // Extract file basename for display
     let file_display = std::path::Path::new(&cli.file)
         .file_name()
@@ -144,7 +147,7 @@ fn main() -> Result<()> {
         .unwrap_or(&cli.file)
         .to_string();
 
-    let app = App::new(groups, events, tty_output, file_display);
+    let app = App::new(groups, events, tty_output, exec_trees, file_display);
 
     // Run TUI
     run_tui(app)
@@ -180,6 +183,143 @@ fn run_tui(mut app: App) -> Result<()> {
     terminal.show_cursor()?;
 
     result
+}
+
+// ── Exec tree builder ────────────────────────────────────────────────────────
+
+/// Build execve process trees per command group using ppid chains.
+///
+/// For each CommandGroup, extract execve/execveat events, then organise
+/// them into a depth-first tree based on ppid relationships. An execve
+/// is considered a "root" (depth 1) if its ppid does not match any other
+/// execve's pid within the same group.
+fn build_exec_trees(
+    groups: &[CommandGroup],
+    events: &[BehaviorEvent],
+) -> Vec<Vec<ExecChild>> {
+    use std::collections::{HashMap, HashSet};
+
+    groups
+        .iter()
+        .map(|group| {
+            // Collect execve events in this group
+            let execves: Vec<(usize, &BehaviorEvent)> = group
+                .event_indices
+                .iter()
+                .filter_map(|&idx| events.get(idx).map(|e| (idx, e)))
+                .filter(|(_, e)| e.event.name == "execve" || e.event.name == "execveat")
+                .collect();
+
+            if execves.is_empty() {
+                return vec![];
+            }
+
+            // Build set of pids that have an execve in this group
+            let execve_pids: HashSet<u32> =
+                execves.iter().map(|(_, e)| e.header.pid).collect();
+
+            // Partition into roots vs children based on ppid
+            let mut children_of: HashMap<u32, Vec<(usize, &BehaviorEvent)>> = HashMap::new();
+            let mut roots: Vec<(usize, &BehaviorEvent)> = Vec::new();
+
+            for &(idx, ev) in &execves {
+                let ppid = ev.header.ppid.unwrap_or(0);
+                if execve_pids.contains(&ppid) {
+                    children_of.entry(ppid).or_default().push((idx, ev));
+                } else {
+                    roots.push((idx, ev));
+                }
+            }
+
+            // Sort roots by timestamp
+            roots.sort_by(|a, b| {
+                a.1.header
+                    .timestamp
+                    .partial_cmp(&b.1.header.timestamp)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            // Sort children within each parent by timestamp
+            for children in children_of.values_mut() {
+                children.sort_by(|a, b| {
+                    a.1.header
+                        .timestamp
+                        .partial_cmp(&b.1.header.timestamp)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+
+            // DFS to build flat tree
+            let mut result = Vec::new();
+            let root_count = roots.len();
+            for (ri, (idx, ev)) in roots.into_iter().enumerate() {
+                exec_tree_dfs(
+                    ev.header.pid,
+                    1,
+                    idx,
+                    ev,
+                    ri == root_count - 1,
+                    &children_of,
+                    &mut result,
+                );
+            }
+
+            result
+        })
+        .collect()
+}
+
+/// DFS helper: emit the current node, then recurse into children.
+fn exec_tree_dfs(
+    pid: u32,
+    depth: usize,
+    idx: usize,
+    ev: &BehaviorEvent,
+    is_last: bool,
+    children_of: &std::collections::HashMap<u32, Vec<(usize, &BehaviorEvent)>>,
+    result: &mut Vec<ExecChild>,
+) {
+    let label = build_exec_label(ev);
+    result.push(ExecChild {
+        label,
+        pid,
+        depth,
+        event_index: idx,
+        is_last,
+    });
+
+    if let Some(children) = children_of.get(&pid) {
+        let child_count = children.len();
+        for (ci, &(child_idx, child_ev)) in children.iter().enumerate() {
+            exec_tree_dfs(
+                child_ev.header.pid,
+                depth + 1,
+                child_idx,
+                child_ev,
+                ci == child_count - 1,
+                children_of,
+                result,
+            );
+        }
+    }
+}
+
+/// Build a display label from an execve event's args.
+fn build_exec_label(ev: &BehaviorEvent) -> String {
+    if let Some(args) = &ev.args {
+        // Try to reconstruct from argv
+        if let Some(argv) = args.get("argv").and_then(|v| v.as_array()) {
+            let parts: Vec<&str> = argv.iter().filter_map(|v| v.as_str()).collect();
+            if !parts.is_empty() {
+                return parts.join(" ");
+            }
+        }
+        // Fallback to filename
+        if let Some(filename) = args.get("filename").and_then(|v| v.as_str()) {
+            return filename.to_string();
+        }
+    }
+    ev.header.comm.clone()
 }
 
 /// Build decoded TTY output text per command group.

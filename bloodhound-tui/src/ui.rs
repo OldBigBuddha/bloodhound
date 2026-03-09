@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, Pane, Tab};
+use crate::app::{App, HistoryRow, Pane, Tab};
 use crate::event_model::EventCategory;
 
 /// Primary color palette.
@@ -21,6 +21,7 @@ const NETWORK_COLOR: Color = Color::Rgb(224, 108, 117);    // Red
 const DIM_TEXT: Color = Color::Rgb(120, 120, 120);          // Dim
 const STATUS_BG: Color = Color::Rgb(40, 44, 52);           // Dark bg
 const OUTPUT_COLOR: Color = Color::Rgb(86, 182, 194);      // Cyan
+const TREE_COLOR: Color = Color::Rgb(152, 195, 121);       // Green for exec children
 
 /// Render the full UI.
 pub fn draw(f: &mut Frame, app: &App) {
@@ -56,7 +57,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_status_bar(f, app, chunks[1]);
 }
 
-/// Draw the left pane: command history.
+/// Draw the left pane: command history with tree view.
 fn draw_history_pane(f: &mut Frame, app: &App, area: Rect) {
     let is_active = app.active_pane == Pane::History;
     let border_color = if is_active { ACTIVE_BORDER } else { INACTIVE_BORDER };
@@ -67,34 +68,92 @@ fn draw_history_pane(f: &mut Frame, app: &App, area: Rect) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color));
 
-    let items: Vec<ListItem> = app
-        .commands
+    let visible = app.visible_rows();
+
+    let items: Vec<ListItem> = visible
         .iter()
         .enumerate()
-        .map(|(i, group)| {
-            let prefix = if i == app.selected_command { "▸ " } else { "  " };
-            let cmd_display = if group.command.is_empty() {
-                "(empty)".to_string()
-            } else {
-                group.command.clone()
-            };
-            let event_count = group.event_indices.len();
-            let content = format!("{}{} ({})", prefix, cmd_display, event_count);
+        .map(|(row_idx, row)| match row {
+            HistoryRow::Command(gi) => {
+                let group = &app.commands[*gi];
+                let has_children = app
+                    .exec_trees
+                    .get(*gi)
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false);
+                let is_expanded = app.expanded.get(*gi).copied().unwrap_or(false);
 
-            let style = if i == app.selected_command {
-                Style::default()
-                    .fg(HIGHLIGHT_COLOR)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::White)
-            };
+                let arrow = if !has_children {
+                    "  "
+                } else if is_expanded {
+                    "▾ "
+                } else {
+                    "▸ "
+                };
 
-            ListItem::new(content).style(style)
+                let cmd_display = if group.command.is_empty() {
+                    "(empty)".to_string()
+                } else {
+                    group.command.clone()
+                };
+                let event_count = group.event_indices.len();
+                let child_count = app.exec_trees.get(*gi).map(|v| v.len()).unwrap_or(0);
+
+                let counter = if child_count > 0 {
+                    format!(" ({}/{})", child_count, event_count)
+                } else {
+                    format!(" ({})", event_count)
+                };
+
+                let is_selected = row_idx == app.history_cursor;
+                let style = if is_selected {
+                    Style::default()
+                        .fg(HIGHLIGHT_COLOR)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+
+                ListItem::new(Line::from(vec![
+                    Span::styled(arrow, style),
+                    Span::styled(cmd_display, style),
+                    Span::styled(counter, Style::default().fg(DIM_TEXT)),
+                ]))
+            }
+            HistoryRow::Exec { group, child } => {
+                let exec_child = &app.exec_trees[*group][*child];
+
+                let indent = "  ".repeat(exec_child.depth);
+                let branch = if exec_child.is_last { "└─ " } else { "├─ " };
+                let pid_str = format!(" :{}", exec_child.pid);
+
+                let is_selected = row_idx == app.history_cursor;
+                let label_style = if is_selected {
+                    Style::default()
+                        .fg(HIGHLIGHT_COLOR)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(TREE_COLOR)
+                };
+                let branch_style = if is_selected {
+                    Style::default()
+                        .fg(HIGHLIGHT_COLOR)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(DIM_TEXT)
+                };
+
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("{}{}", indent, branch), branch_style),
+                    Span::styled(exec_child.label.clone(), label_style),
+                    Span::styled(pid_str, Style::default().fg(DIM_TEXT)),
+                ]))
+            }
         })
         .collect();
 
     let mut list_state = ListState::default();
-    list_state.select(Some(app.selected_command));
+    list_state.select(Some(app.history_cursor));
 
     let list = List::new(items)
         .block(block)
@@ -112,9 +171,10 @@ fn draw_output_pane(f: &mut Frame, app: &App, area: Rect) {
     let is_active = app.active_pane == Pane::Output;
     let border_color = if is_active { ACTIVE_BORDER } else { INACTIVE_BORDER };
 
+    let gi = app.selected_group();
     let lines: Vec<String> = app
         .tty_output
-        .get(app.selected_command)
+        .get(gi)
         .cloned()
         .unwrap_or_default();
 
@@ -282,9 +342,10 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let cmd_info = if app.commands.is_empty() {
         "No commands".to_string()
     } else {
+        let gi = app.selected_group();
         format!(
             "Command {}/{}",
-            app.selected_command + 1,
+            gi + 1,
             app.commands.len()
         )
     };
@@ -327,7 +388,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "   j/k:nav  Tab:pane  1-5:tab  q:quit ",
+            "   j/k:nav  ⏎:expand  Tab:pane  1-5:tab  q:quit ",
             Style::default().fg(DIM_TEXT),
         ),
     ]);

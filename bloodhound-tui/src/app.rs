@@ -53,6 +53,33 @@ impl Tab {
     }
 }
 
+// ── Tree data structures ─────────────────────────────────────────────────────
+
+/// A child execve entry in the process tree under a command.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct ExecChild {
+    /// Display label (e.g., "curl -sL https://...").
+    pub label: String,
+    /// Process ID.
+    pub pid: u32,
+    /// Tree depth (1 = direct child of shell, 2 = grandchild, etc.).
+    pub depth: usize,
+    /// Index into the global events array.
+    pub event_index: usize,
+    /// Whether this is the last sibling at its depth level.
+    pub is_last: bool,
+}
+
+/// A row in the visible history pane (commands + expanded exec children).
+#[derive(Debug, Clone)]
+pub enum HistoryRow {
+    /// A command entry (index into commands[]).
+    Command(usize),
+    /// An exec child (group index, child index within exec_trees[group]).
+    Exec { group: usize, child: usize },
+}
+
 /// Application state.
 pub struct App {
     /// Correlated command groups.
@@ -61,9 +88,13 @@ pub struct App {
     pub events: Vec<BehaviorEvent>,
     /// Decoded TTY output lines per command group index.
     pub tty_output: Vec<Vec<String>>,
+    /// Exec child trees per command group (parallel to commands).
+    pub exec_trees: Vec<Vec<ExecChild>>,
+    /// Expand/collapse state per command group (parallel to commands).
+    pub expanded: Vec<bool>,
 
-    /// Currently selected command index in the left pane.
-    pub selected_command: usize,
+    /// Currently selected row in the visible history list.
+    pub history_cursor: usize,
     /// Active pane.
     pub active_pane: Pane,
     /// Active detail tab (bottom-right).
@@ -86,14 +117,18 @@ impl App {
         commands: Vec<CommandGroup>,
         events: Vec<BehaviorEvent>,
         tty_output: Vec<Vec<String>>,
+        exec_trees: Vec<Vec<ExecChild>>,
         file_path: String,
     ) -> Self {
         let total_events = events.len();
+        let expanded = vec![false; commands.len()];
         Self {
             commands,
             events,
             tty_output,
-            selected_command: 0,
+            exec_trees,
+            expanded,
+            history_cursor: 0,
             active_pane: Pane::History,
             active_tab: Tab::All,
             output_scroll: 0,
@@ -104,9 +139,35 @@ impl App {
         }
     }
 
+    /// Compute the flat list of visible rows (commands + expanded children).
+    pub fn visible_rows(&self) -> Vec<HistoryRow> {
+        let mut rows = Vec::new();
+        for (gi, _) in self.commands.iter().enumerate() {
+            rows.push(HistoryRow::Command(gi));
+            if self.expanded.get(gi).copied().unwrap_or(false) {
+                if let Some(children) = self.exec_trees.get(gi) {
+                    for (ci, _) in children.iter().enumerate() {
+                        rows.push(HistoryRow::Exec { group: gi, child: ci });
+                    }
+                }
+            }
+        }
+        rows
+    }
+
+    /// Get the group index for the currently selected history row.
+    pub fn selected_group(&self) -> usize {
+        let rows = self.visible_rows();
+        match rows.get(self.history_cursor) {
+            Some(HistoryRow::Command(gi)) => *gi,
+            Some(HistoryRow::Exec { group, .. }) => *group,
+            None => 0,
+        }
+    }
+
     /// Get the currently selected command group.
     pub fn current_group(&self) -> Option<&CommandGroup> {
-        self.commands.get(self.selected_command)
+        self.commands.get(self.selected_group())
     }
 
     /// Get filtered events for the current command group and active tab.
@@ -124,13 +185,47 @@ impl App {
             .collect()
     }
 
+    /// Toggle expand/collapse on the current row.
+    pub fn toggle_expand(&mut self) {
+        let rows = self.visible_rows();
+        match rows.get(self.history_cursor).cloned() {
+            Some(HistoryRow::Command(gi)) => {
+                let has_children = self
+                    .exec_trees
+                    .get(gi)
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false);
+                if has_children {
+                    if let Some(exp) = self.expanded.get_mut(gi) {
+                        *exp = !*exp;
+                    }
+                }
+            }
+            Some(HistoryRow::Exec { group, .. }) => {
+                // Collapse the parent and move cursor to it
+                if let Some(exp) = self.expanded.get_mut(group) {
+                    *exp = false;
+                }
+                let rows = self.visible_rows();
+                for (i, row) in rows.iter().enumerate() {
+                    if matches!(row, HistoryRow::Command(g) if *g == group) {
+                        self.history_cursor = i;
+                        break;
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+
     // ── Navigation ───────────────────────────────────────────────────────
 
     pub fn select_next(&mut self) {
         match self.active_pane {
             Pane::History => {
-                if !self.commands.is_empty() && self.selected_command < self.commands.len() - 1 {
-                    self.selected_command += 1;
+                let count = self.visible_rows().len();
+                if count > 0 && self.history_cursor < count - 1 {
+                    self.history_cursor += 1;
                     self.output_scroll = 0;
                     self.detail_scroll = 0;
                 }
@@ -147,8 +242,8 @@ impl App {
     pub fn select_prev(&mut self) {
         match self.active_pane {
             Pane::History => {
-                if self.selected_command > 0 {
-                    self.selected_command -= 1;
+                if self.history_cursor > 0 {
+                    self.history_cursor -= 1;
                     self.output_scroll = 0;
                     self.detail_scroll = 0;
                 }
@@ -165,7 +260,7 @@ impl App {
     pub fn jump_top(&mut self) {
         match self.active_pane {
             Pane::History => {
-                self.selected_command = 0;
+                self.history_cursor = 0;
                 self.output_scroll = 0;
                 self.detail_scroll = 0;
             }
@@ -181,16 +276,18 @@ impl App {
     pub fn jump_bottom(&mut self) {
         match self.active_pane {
             Pane::History => {
-                if !self.commands.is_empty() {
-                    self.selected_command = self.commands.len() - 1;
-                    self.output_scroll = 0;
-                    self.detail_scroll = 0;
+                let count = self.visible_rows().len();
+                if count > 0 {
+                    self.history_cursor = count - 1;
                 }
+                self.output_scroll = 0;
+                self.detail_scroll = 0;
             }
             Pane::Output => {
+                let gi = self.selected_group();
                 let count = self
                     .tty_output
-                    .get(self.selected_command)
+                    .get(gi)
                     .map(|v| v.len())
                     .unwrap_or(0);
                 self.output_scroll = count.saturating_sub(1);

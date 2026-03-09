@@ -14,6 +14,13 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             app.should_quit = true;
         }
 
+        // Expand/collapse tree nodes
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            if app.active_pane == crate::app::Pane::History {
+                app.toggle_expand();
+            }
+        }
+
         // Navigation
         KeyCode::Char('j') | KeyCode::Down => app.select_next(),
         KeyCode::Char('k') | KeyCode::Up => app.select_prev(),
