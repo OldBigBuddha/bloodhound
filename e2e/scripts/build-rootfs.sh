@@ -10,9 +10,20 @@ PROJECT_ROOT="$(dirname "${E2E_DIR}")"
 # Build Docker image
 docker build -t bloodhound-e2e "${E2E_DIR}"
 
-# Export filesystem as tarball
+# Export filesystem as tarball + extract vmlinuz
 CONTAINER_ID=$(docker create bloodhound-e2e)
 docker export "${CONTAINER_ID}" -o "${E2E_DIR}/rootfs.tar"
+
+# Extract vmlinuz from the container (must match the kernel modules installed
+# in the Dockerfile). The E2E VM MUST boot with this exact kernel — using the
+# host kernel (e.g. 6.14.0-azure on GitHub Actions) will cause task_struct
+# offset mismatches and zero trace events.
+docker cp "${CONTAINER_ID}:/boot/vmlinuz-6.8.0-49-generic" "${E2E_DIR}/vmlinuz" 2>/dev/null || true
+if [[ ! -f "${E2E_DIR}/vmlinuz" ]]; then
+    echo "WARNING: vmlinuz not found in Docker image, trying rootfs.tar..."
+    tar xf "${E2E_DIR}/rootfs.tar" -C "${E2E_DIR}" --strip-components=1 boot/vmlinuz-6.8.0-49-generic 2>/dev/null \
+        && mv "${E2E_DIR}/vmlinuz-6.8.0-49-generic" "${E2E_DIR}/vmlinuz" || true
+fi
 docker rm "${CONTAINER_ID}"
 
 # Create ext4 image from tarball
