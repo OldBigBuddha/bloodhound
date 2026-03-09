@@ -13,3 +13,4 @@ serde_json = "1"
 clap = { version = "4", features = ["derive"] }
 base64 = "0.22"
 anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }

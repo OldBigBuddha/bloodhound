@@ -20,6 +20,7 @@ const FILES_COLOR: Color = Color::Rgb(229, 192, 123);      // Yellow
 const NETWORK_COLOR: Color = Color::Rgb(224, 108, 117);    // Red
 const DIM_TEXT: Color = Color::Rgb(120, 120, 120);          // Dim
 const STATUS_BG: Color = Color::Rgb(40, 44, 52);           // Dark bg
+const TIMESTAMP_COLOR: Color = Color::Rgb(130, 137, 151);     // Muted for timestamps
 const OUTPUT_COLOR: Color = Color::Rgb(86, 182, 194);      // Cyan
 const TREE_COLOR: Color = Color::Rgb(152, 195, 121);       // Green for exec children
 
@@ -105,6 +106,8 @@ fn draw_history_pane(f: &mut Frame, app: &App, area: Rect) {
                     format!(" ({})", event_count)
                 };
 
+                let timestamp = app.format_timestamp(group.timestamp);
+
                 let is_selected = row_idx == app.history_cursor;
                 let style = if is_selected {
                     Style::default()
@@ -115,6 +118,7 @@ fn draw_history_pane(f: &mut Frame, app: &App, area: Rect) {
                 };
 
                 ListItem::new(Line::from(vec![
+                    Span::styled(format!("{} ", timestamp), Style::default().fg(TIMESTAMP_COLOR)),
                     Span::styled(arrow, style),
                     Span::styled(cmd_display, style),
                     Span::styled(counter, Style::default().fg(DIM_TEXT)),
@@ -122,10 +126,12 @@ fn draw_history_pane(f: &mut Frame, app: &App, area: Rect) {
             }
             HistoryRow::Exec { group, child } => {
                 let exec_child = &app.exec_trees[*group][*child];
+                let event = &app.events[exec_child.event_index];
 
                 let indent = "  ".repeat(exec_child.depth);
                 let branch = if exec_child.is_last { "└─ " } else { "├─ " };
                 let pid_str = format!(" :{}", exec_child.pid);
+                let timestamp = app.format_timestamp(event.header.timestamp);
 
                 let is_selected = row_idx == app.history_cursor;
                 let label_style = if is_selected {
@@ -144,6 +150,7 @@ fn draw_history_pane(f: &mut Frame, app: &App, area: Rect) {
                 };
 
                 ListItem::new(Line::from(vec![
+                    Span::styled(format!("{} ", timestamp), Style::default().fg(TIMESTAMP_COLOR)),
                     Span::styled(format!("{}{}", indent, branch), branch_style),
                     Span::styled(exec_child.label.clone(), label_style),
                     Span::styled(pid_str, Style::default().fg(DIM_TEXT)),

@@ -1,3 +1,5 @@
+use chrono::{DateTime, FixedOffset, Utc};
+
 use crate::correlator::CommandGroup;
 use crate::event_model::{BehaviorEvent, EventCategory};
 
@@ -110,6 +112,11 @@ pub struct App {
     pub total_events: usize,
     /// Whether the app should quit.
     pub should_quit: bool,
+
+    /// Absolute boot time (UTC) for converting monotonic timestamps to wall clock.
+    pub boot_time_utc: DateTime<Utc>,
+    /// Timezone offset for display.
+    pub tz_offset: FixedOffset,
 }
 
 impl App {
@@ -119,6 +126,8 @@ impl App {
         tty_output: Vec<Vec<String>>,
         exec_trees: Vec<Vec<ExecChild>>,
         file_path: String,
+        boot_time_utc: DateTime<Utc>,
+        tz_offset: FixedOffset,
     ) -> Self {
         let total_events = events.len();
         let expanded = vec![false; commands.len()];
@@ -136,7 +145,17 @@ impl App {
             file_path,
             total_events,
             should_quit: false,
+            boot_time_utc,
+            tz_offset,
         }
+    }
+
+    /// Convert a monotonic eBPF timestamp to a display string in the configured timezone.
+    pub fn format_timestamp(&self, mono_secs: f64) -> String {
+        let wall_utc = self.boot_time_utc
+            + chrono::Duration::milliseconds((mono_secs * 1000.0) as i64);
+        let wall_local = wall_utc.with_timezone(&self.tz_offset);
+        wall_local.format("%H:%M:%S").to_string()
     }
 
     /// Compute the flat list of visible rows (commands + expanded children).

@@ -10,6 +10,7 @@ use std::io;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use chrono::{DateTime, FixedOffset, Utc};
 use clap::Parser;
 use crossterm::{
     event::{self, Event},
@@ -31,6 +32,11 @@ const FILE_SIZE_WARNING_BYTES: u64 = 50 * 1024 * 1024; // 50 MB
 struct Cli {
     /// Path to the Bloodhound NDJSON file
     file: String,
+
+    /// Timezone for timestamp display (e.g. "+09:00", "-05:00").
+    /// Default: "+00:00" (UTC)
+    #[arg(long, default_value = "+00:00")]
+    timezone: String,
 }
 
 fn main() -> Result<()> {
@@ -147,7 +153,23 @@ fn main() -> Result<()> {
         .unwrap_or(&cli.file)
         .to_string();
 
-    let app = App::new(groups, events, tty_output, exec_trees, file_display);
+    // Parse timezone offset
+    let tz_offset = FixedOffset::east_opt(parse_tz_offset(&cli.timezone)?)
+        .ok_or_else(|| anyhow::anyhow!("Invalid timezone offset: {}", cli.timezone))?;
+
+    // Compute boot time anchor.
+    //
+    // The eBPF timestamps are monotonic (bpf_ktime_get_ns / 1e9 = seconds since boot).
+    // To show wall-clock time, we anchor the last event's monotonic timestamp to the
+    // file's modification time (= roughly when the daemon last wrote), then derive
+    // the boot instant.  This gives approximate wall-clock timestamps for all events.
+    let file_mtime: DateTime<Utc> = fs::metadata(&cli.file)?
+        .modified()?
+        .into();
+    let last_mono = events.last().map(|e| e.header.timestamp).unwrap_or(0.0);
+    let boot_time_utc = file_mtime - chrono::Duration::milliseconds((last_mono * 1000.0) as i64);
+
+    let app = App::new(groups, events, tty_output, exec_trees, file_display, boot_time_utc, tz_offset);
 
     // Run TUI
     run_tui(app)
@@ -426,4 +448,24 @@ fn strip_ansi_escapes(raw: &[u8]) -> String {
     }
 
     out
+}
+
+/// Parse a timezone offset string like "+09:00" or "-05:00" to seconds.
+fn parse_tz_offset(s: &str) -> Result<i32> {
+    let s = s.trim();
+    if s == "UTC" || s == "utc" {
+        return Ok(0);
+    }
+    let (sign, rest) = match s.as_bytes().first() {
+        Some(b'+') => (1i32, &s[1..]),
+        Some(b'-') => (-1i32, &s[1..]),
+        _ => bail!("Timezone must start with '+' or '-' (e.g. +09:00), got: {}", s),
+    };
+    let parts: Vec<&str> = rest.split(':').collect();
+    if parts.len() != 2 {
+        bail!("Timezone format must be ±HH:MM (e.g. +09:00), got: {}", s);
+    }
+    let hours: i32 = parts[0].parse().with_context(|| format!("Invalid hours in timezone: {}", s))?;
+    let minutes: i32 = parts[1].parse().with_context(|| format!("Invalid minutes in timezone: {}", s))?;
+    Ok(sign * (hours * 3600 + minutes * 60))
 }
