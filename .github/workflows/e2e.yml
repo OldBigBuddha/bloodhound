@@ -1,0 +1,105 @@
+name: E2E Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  e2e:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build binary via Docker
+        run: make build-docker
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -la /dev/kvm
+
+      - name: Install QEMU & sshpass
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 sshpass
+
+      - name: Build rootfs
+        working-directory: e2e
+        run: bash scripts/build-rootfs.sh
+
+      - name: Boot VM
+        working-directory: e2e
+        run: |
+          bash scripts/boot-vm.sh rootfs.ext4 2222 2048 2 &
+          echo "Waiting for VM to boot..."
+          for i in $(seq 1 60); do
+            sshpass -p root ssh \
+              -o StrictHostKeyChecking=no \
+              -o ConnectTimeout=2 \
+              -p 2222 root@localhost true 2>/dev/null && break
+            sleep 2
+          done
+          echo "VM is ready"
+
+      - name: Wait for bloodhound daemon
+        run: |
+          echo "Waiting for bloodhound daemon to load BPF programs..."
+          for i in $(seq 1 40); do
+            if sshpass -p root ssh \
+              -o StrictHostKeyChecking=no \
+              -p 2222 root@localhost \
+              "journalctl -u bloodhound --no-pager -n 20" 2>/dev/null \
+              | grep -q "BPF programs loaded"; then
+              echo "Daemon ready (waited ~$((i*3))s)"
+              break
+            fi
+            sleep 3
+          done
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        working-directory: e2e
+        run: pip install pytest pexpect
+
+      - name: Run E2E tests
+        working-directory: e2e/tests
+        run: |
+          python -m pytest -v \
+            --ssh-port=2222 \
+            --ssh-host=localhost \
+            --tb=long \
+            .
+
+      - name: Collect VM logs (on failure)
+        if: failure()
+        working-directory: e2e
+        run: |
+          echo "=== QEMU log (last 50 lines) ==="
+          tail -50 qemu.log 2>/dev/null || true
+          echo ""
+          echo "=== Bloodhound daemon journal ==="
+          sshpass -p root ssh \
+            -o StrictHostKeyChecking=no \
+            -p 2222 root@localhost \
+            "journalctl -u bloodhound --no-pager -n 50" 2>/dev/null || true
+          echo ""
+          echo "=== NDJSON output (last 20 lines) ==="
+          sshpass -p root ssh \
+            -o StrictHostKeyChecking=no \
+            -p 2222 root@localhost \
+            "tail -20 /var/log/bloodhound.ndjson" 2>/dev/null || true
+
+      - name: Shutdown VM
+        if: always()
+        run: sudo pkill -f "qemu-system-x86_64" || true

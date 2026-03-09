@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build binary via Docker
+        run: make build-docker
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: bloodhound-binary
+          path: target/docker/bloodhound
+          retention-days: 1
