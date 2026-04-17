@@ -4,75 +4,57 @@ use aya_ebpf::helpers::{
 };
 use bloodhound_common::{EventHeader, COMM_SIZE};
 
+use crate::vmlinux::task_struct;
 use crate::{DAEMON_PID, TARGET_AUID};
 
 /// Read auid (loginuid.val) from the current task's task_struct.
 ///
-/// # Kernel-Specific Hardcoded Offset
+/// Uses the typed `task_struct` definition from `vmlinux.rs` to compute
+/// the field offset via `core::ptr::addr_of!`, replacing the previous
+/// hardcoded byte offset (`0xc88`).
 ///
-/// The loginuid field offset (`0xc88`) was obtained by parsing
-/// `/sys/kernel/btf/vmlinux` on the target kernel (6.8.0-49-generic, Ubuntu).
-/// This offset varies across kernel versions and configurations.
+/// # CO-RE Note
 ///
-/// To find the correct offset for a different kernel:
-/// ```sh
-/// pahole -C task_struct /sys/kernel/btf/vmlinux | grep loginuid
-/// ```
-/// Or use the Python BTF parser in this project's e2e scripts.
+/// The field offset is derived at compile time from the struct layout
+/// in `vmlinux.rs` (target: kernel 6.8.0-49-generic, x86_64). When
+/// the target kernel changes, update `vmlinux.rs` — see that module's
+/// documentation for the regeneration procedure.
 ///
-/// In production, use CO-RE (Compile Once, Run Everywhere) relocations
-/// instead of hardcoded offsets. Aya supports this via `#[repr(C)]`
-/// BTF-aware struct definitions.
+/// When rustc gains `preserve_access_index` support, the BPF loader
+/// will automatically relocate this access for different kernels
+/// without any code changes.
 #[inline(always)]
 pub unsafe fn get_current_auid() -> u32 {
     let task = bpf_get_current_task();
     if task == 0 {
         return u32::MAX;
     }
-    let task_ptr = task as *const u8;
+    let task_ptr = task as *const task_struct;
 
-    // Read loginuid.val from task_struct.
-    // On kernel 6.8, loginuid is at a specific offset in task_struct.
-    // We use bpf_probe_read_kernel to read it safely.
-    // The BTF verifier will validate the access at load time.
-    //
-    // task_struct.loginuid is of type kuid_t which contains a single u32 val field.
-    // We read it using the known field offset approach.
-    // Note: In Aya with CO-RE, the verifier adjusts offsets automatically
-    // when using BTF-aware reads.
-    let mut auid: u32 = u32::MAX;
-    // loginuid offset in task_struct for kernel 6.8.0-49-generic (Ubuntu 22.04 HWE)
-    // See docs/ebpf-offsets.md for the full offset table and verification procedure.
-    //   loginuid: offset=0xc88 (3208 bytes)
-    //   sessionid: offset=0xc8c (3212 bytes)
-    // ⚠️  IMPORTANT: Always verify on the TARGET KERNEL (VM), not the build host.
-    //     Wrong offset → reads garbage → should_trace() always returns false → 0 events.
-    let loginuid_offset: usize = 0xc88;
-    let _ = bpf_probe_read_kernel(
-        task_ptr.add(loginuid_offset) as *const u32,
-    )
-    .map(|v| auid = v);
-    auid
+    // Read loginuid (kuid_t) via typed pointer.
+    // addr_of! computes the field offset from the struct definition
+    // in vmlinux.rs, avoiding a hardcoded hex constant.
+    let loginuid_ptr = core::ptr::addr_of!((*task_ptr).loginuid);
+    bpf_probe_read_kernel(loginuid_ptr)
+        .map(|kuid| kuid.val)
+        .unwrap_or(u32::MAX)
 }
 
 /// Read sessionid from the current task's task_struct.
+///
+/// Same CO-RE approach as `get_current_auid` — the offset comes from
+/// the typed struct definition in `vmlinux.rs`.
 #[inline(always)]
 pub unsafe fn get_current_sessionid() -> u32 {
     let task = bpf_get_current_task();
     if task == 0 {
         return u32::MAX;
     }
-    let task_ptr = task as *const u8;
+    let task_ptr = task as *const task_struct;
 
-    let mut sessionid: u32 = u32::MAX;
-    // sessionid offset in task_struct (immediately after loginuid, +4 bytes)
-    // ⚠️  Same kernel-version caveat as loginuid above.
-    let sessionid_offset: usize = 0xc8c;
-    let _ = bpf_probe_read_kernel(
-        task_ptr.add(sessionid_offset) as *const u32,
-    )
-    .map(|v| sessionid = v);
-    sessionid
+    let sessionid_ptr = core::ptr::addr_of!((*task_ptr).sessionid);
+    bpf_probe_read_kernel(sessionid_ptr)
+        .unwrap_or(u32::MAX)
 }
 
 /// Check if the current task should be traced (matches TARGET_AUID).

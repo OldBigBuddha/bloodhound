@@ -1,25 +1,53 @@
-# eBPF `task_struct` Offset Management
+# eBPF `task_struct` Field Access
 
-Bloodhound reads kernel `task_struct` fields using **hardcoded byte offsets**.
-These offsets are **kernel-version-specific** and will silently break if the
-target kernel changes. This document explains why, how to verify, and what
-to watch for.
+Bloodhound reads kernel `task_struct` fields (`loginuid`, `sessionid`,
+`tgid`, `pid`) to identify and filter traced processes. These fields
+are accessed via typed struct definitions in `bloodhound-ebpf/src/vmlinux.rs`.
 
-## Why Hardcoded Offsets?
+## How It Works
 
-Aya's eBPF programs run on `bpfel-unknown-none` (no libc, no BTF relocations
-in non-CO-RE mode). To read `task_struct` fields like `loginuid`, `sessionid`,
-and `tgid`, we use `bpf_probe_read_kernel()` with a raw pointer at a known
-byte offset from the `task_struct` base.
+The `vmlinux.rs` module defines a minimal `task_struct` with only the
+fields bloodhound accesses:
+
+```rust
+#[repr(C)]
+pub struct task_struct {
+    _pad0: [u8; 0x9a0],         // padding → pid
+    pub pid: i32,                // offset 0x9a0
+    pub tgid: i32,               // offset 0x9a4
+    _pad1: [u8; 0xc88 - 0x9a8], // padding → loginuid
+    pub loginuid: kuid_t,        // offset 0xc88
+    pub sessionid: u32,          // offset 0xc8c
+}
+```
+
+Field access uses `core::ptr::addr_of!` to compute offsets from the
+struct layout, then `bpf_probe_read_kernel` to safely read the value:
+
+```rust
+let task_ptr = bpf_get_current_task() as *const task_struct;
+let loginuid_ptr = core::ptr::addr_of!((*task_ptr).loginuid);
+let auid = bpf_probe_read_kernel(loginuid_ptr)
+    .map(|kuid| kuid.val)
+    .unwrap_or(u32::MAX);
+```
+
+## CO-RE Status
+
+> **Note:** As of 2026-04, the Rust compiler does not emit
+> `preserve_access_index` BTF relocation markers. The field offsets
+> are fixed at compile time to the target kernel. When rustc gains
+> CO-RE support, the existing code will work as-is — only a recompile
+> is needed.
 
 ## Current Offsets (kernel `6.8.0-49-generic`, Ubuntu 22.04 HWE)
 
 | Field       | Byte Offset | Hex    | Source File      | Used For            |
 |-------------|-------------|--------|------------------|---------------------|
-| `pid`       | 2464        | 0x9a0  | (reference only) | —                   |
-| `tgid`      | 2468        | 0x9a4  | `lsm_hooks.rs`  | LSM target PID check|
-| `loginuid`  | 3208        | 0xc88  | `filter.rs`      | `should_trace()`    |
-| `sessionid` | 3212        | 0xc8c  | `filter.rs`      | Event header        |
+| `pid`       | 2464        | 0x9a0  | `vmlinux.rs`     | (reference only)    |
+| `tgid`      | 2468        | 0x9a4  | `vmlinux.rs`     | LSM target PID check|
+| `loginuid`  | 3208        | 0xc88  | `vmlinux.rs`     | `should_trace()`    |
+| `sessionid` | 3212        | 0xc8c  | `vmlinux.rs`     | Event header        |
 
 ## How to Verify Offsets
 
@@ -116,6 +144,8 @@ Re-run the offset verification script whenever:
 1. The VM kernel is upgraded (even minor patch versions can change layout)
 2. Kernel config changes (e.g., enabling/disabling `CONFIG_AUDIT`)
 3. Moving to a different distribution or kernel branch
+
+Then update the struct definition in `bloodhound-ebpf/src/vmlinux.rs`.
 
 ## DAC vs LSM Permission Ordering
 
