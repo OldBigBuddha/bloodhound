@@ -224,6 +224,10 @@ same syscall invocation (see deduplication above).
 - file_open, task_kill, bpf, ptrace_access_check
 - inode_unlink, inode_rename, task_fix_setuid
 
+Note: Layer 3 coverage is conventional-syscall only. I/O submitted via
+`io_uring` rings does not traverse these tracepoints; see §Known
+Limitations §io_uring observation gap.
+
 ### fd type classification
 
 DECIDED: For `read` and `write` events, the BPF program determines
@@ -354,3 +358,49 @@ scenarios.
 ### Socket tracking table
 
 DECIDED: 4096 entries. Sufficient for a single-user VM.
+
+### Protocol semantic extraction is out of scope
+
+DECIDED: Bloodhound emits raw packet bytes (Base64 in `args.data`) and
+does not parse higher-layer protocols. DNS query/answer extraction,
+TLS SNI extraction, HTTP header parsing, and similar are the responsibility
+of downstream consumers.
+
+This boundary is chosen deliberately: BPF-side parsing of variable-length
+protocol fields (compressed DNS labels, TLS record fragmentation,
+chunked HTTP) fights the verifier, while userspace parsers can rely on
+mature protocol libraries. Protocols considered and declined for BPF-side
+extraction:
+
+- DNS (compressed label pointers, variable answer sections)
+- TLS SNI (record fragmentation, ClientHello length variability)
+- HTTP/HTTPS headers (chunked encoding, header continuation, TLS-wrapped)
+
+Downstream pattern matchers that want to match on `domain == "example.com"`
+or `sni == "..."` should layer a parser on top of the PACKET stream.
+
+
+## Known Limitations
+
+This section enumerates observation gaps that operators and downstream
+matcher authors should be aware of.
+
+### io_uring observation gap
+
+Operations submitted via `io_uring` (reads, writes, opens, connects,
+etc.) are performed by the kernel without traversing the conventional
+syscall entry points that Bloodhound's tracepoints attach to (see
+§Layer 3 §Hook points summary). As a result, a target user who performs
+file or network I/O via io_uring will produce an `io_uring_setup` event
+(visible via Tier 1 `raw_syscalls`) but the subsequent I/O operations
+submitted through the ring will be invisible.
+
+Downstream pattern matchers are encouraged to treat the observation of
+`io_uring_setup` (and `io_uring_enter`, `io_uring_register`) as a signal
+that the session's Layer 3 coverage may be incomplete for that process's
+lifetime, and to flag affected sessions as partially-observable.
+
+Proper coverage would require LSM hooks on io_uring command paths
+(e.g., `io_uring_cmd`, `io_uring_override_creds`) with careful handling
+of linked SQEs, fixed files, and registered buffers. This is considered
+future work and is not part of the initial Bloodhound release.
