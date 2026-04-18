@@ -181,28 +181,21 @@ class TestEmitEventClamp:
         assert len(payload_pattern) == payload_size
 
         # Script reads the payload from stdin (avoids shell-escaping a
-        # multi-KiB literal), opens a PTY pair, drains the master side
-        # in a background thread (so pty_write doesn't block on a full
-        # queue), and writes the payload to the slave side — which
-        # triggers `pty_write(slave_tty, buf, 5000)`. The BPF clamp at
-        # entry must limit the event's data to MAX_TTY_DATA - 1.
+        # multi-KiB literal), opens a PTY pair, and writes the payload
+        # to the slave side. Kernel `n_tty_write` loops calling
+        # `pty_write(slave_tty, buf, remaining)` — the first iteration
+        # sees count == payload_size (> MAX_TTY_DATA) and must be
+        # clamped. No background drainer is needed: if the master's
+        # input buffer fills, `pty_write` returns 0 and `n_tty_write`
+        # breaks out of the loop, so the syscall returns promptly with
+        # a partial count.
         script = (
-            "import os, pty, sys, threading, time; "
+            "import os, pty, sys; "
             "m, s = pty.openpty(); "
-            "def drain():\n"
-            "    try:\n"
-            "        while True:\n"
-            "            d = os.read(m, 8192)\n"
-            "            if not d:\n"
-            "                return\n"
-            "    except OSError:\n"
-            "        return\n"
-            "t = threading.Thread(target=drain, daemon=True); t.start(); "
             f"payload = sys.stdin.buffer.read({payload_size}); "
-            f"assert len(payload) == {payload_size}, f\"stdin short: {{len(payload)}}\"; "
+            f"assert len(payload) == {payload_size}, f'stdin short: {{len(payload)}}'; "
             "n = os.write(s, payload); "
             "sys.stdout.write(str(n)); "
-            "time.sleep(0.3); "
             "os.close(s); os.close(m)"
         )
         import subprocess
@@ -223,18 +216,11 @@ class TestEmitEventClamp:
             f"Clamp test script failed: stdout={proc.stdout!r} "
             f"stderr={proc.stderr!r}"
         )
-        try:
-            bytes_written = int(proc.stdout.strip().splitlines()[-1])
-        except (ValueError, IndexError):
-            raise AssertionError(
-                f"Could not parse bytes-written from script output: "
-                f"{proc.stdout!r}"
-            )
-        assert bytes_written > MAX_TTY_DATA, (
-            f"Only {bytes_written} bytes written in one call; cannot "
-            f"exercise the MAX_TTY_DATA clamp. The test requires the "
-            f"single pty_write to be invoked with count > {MAX_TTY_DATA}."
-        )
+        # The userspace write return value may be < payload_size because
+        # the pty's input buffer is 4096 bytes; the kernel-side loop
+        # still invokes `pty_write` with the original count first. We
+        # do NOT use the return value to gate the test — the event-level
+        # clamp-boundary check below proves the clamp path was exercised.
         wait_for_events(seconds=3)
 
         tty_writes = filter_events(
