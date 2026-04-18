@@ -57,6 +57,8 @@ Bloodhound is NOT responsible for:
 - Scenario task definitions
 - Signaling task completion (virtio-serial)
 - Hint generation
+- Protocol-level packet parsing (DNS, TLS SNI, HTTP, etc.); see
+  `docs/tracing.md` §Protocol semantic extraction is out of scope
 
 Downstream consumers read Bloodhound's stdout stream. This separation
 keeps Bloodhound focused and testable.
