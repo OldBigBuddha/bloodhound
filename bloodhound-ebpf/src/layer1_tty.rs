@@ -141,13 +141,20 @@ unsafe fn try_tty_write(ctx: &ProbeContext) -> Result<u32, i64> {
 ///
 /// # Two-stage capture (kprobe + kretprobe)
 ///
-/// At function entry, the userspace destination buffer has **not** been
-/// filled — the kernel writes into it during execution. We therefore:
+/// At function entry, the destination buffer has **not** been filled —
+/// the kernel writes into it during execution. We therefore:
 ///
 /// 1. (entry) Apply the auid + pts/* filter, then stash `(buf_ptr, count)`
 ///    in `TTY_READ_ENTRY_MAP` keyed by `pid_tgid`. No event is emitted.
 /// 2. (return) Look up the stashed pointer, clamp `count` by the return
 ///    value (bytes actually read), and read+emit the data.
+///
+/// **Important:** On kernel 6.8+, the third argument to `n_tty_read` is
+/// `unsigned char *kbuf` — a **kernel-space** buffer allocated by the
+/// VFS layer. The VFS performs `copy_to_user` to the caller's userspace
+/// buffer after `n_tty_read` returns. Therefore the kretprobe must use
+/// `bpf_probe_read_kernel_buf`, not `_user_buf`. This is the symmetric
+/// pitfall to the one documented on `emit_tty_event` for `pty_write`.
 ///
 /// Closes the gap acknowledged in the previous implementation, which
 /// captured only metadata. This is required by `docs/tracing.md` §Layer 1
@@ -238,7 +245,7 @@ unsafe fn try_tty_read_ret(ctx: &RetProbeContext) -> Result<u32, i64> {
 
     // Clamp the actually-read length by the originally-requested count.
     let bytes_read = (ret as usize).min(entry.count as usize);
-    emit_tty_event(EventKind::TtyRead as u8, buf_ptr, bytes_read, true)
+    emit_tty_event(EventKind::TtyRead as u8, buf_ptr, bytes_read, false)
 }
 
 // ── Shared event assembly ────────────────────────────────────────────────────
@@ -247,17 +254,20 @@ unsafe fn try_tty_read_ret(ctx: &RetProbeContext) -> Result<u32, i64> {
 ///
 /// # Kernel vs User space buffer
 ///
-/// `pty_write` receives a **kernel-space** pointer (TTY layer's internal
-/// buffer), while `n_tty_read` returns to the caller having written into
-/// a **user-space** buffer. Picking the wrong helper silently fails:
+/// Both `pty_write` and `n_tty_read` (kernel 6.8+) receive **kernel-space**
+/// pointers — the TTY layer allocates internal buffers for data passing,
+/// and the VFS does the `copy_to_user` / `copy_from_user` bookkeeping
+/// outside of these functions. Picking the wrong helper silently fails:
 /// `bpf_probe_read_user_buf` returns `-EFAULT` on kernel pointers, and
 /// vice versa. Because we ignore the error and skip the event, the
 /// failure is invisible — kprobes fire, `should_trace()` passes, but no
 /// events ever appear in the output.
 ///
-/// The `from_user` flag selects the correct helper:
-///   - `false` → `bpf_probe_read_kernel_buf` (used by `pty_write`)
-///   - `true`  → `bpf_probe_read_user_buf`   (used by `n_tty_read` exit)
+/// The `from_user` flag selects the helper, kept as a parameter to make
+/// the choice explicit at each call site and guard against future hook
+/// additions where a genuinely userspace buffer appears:
+///   - `false` → `bpf_probe_read_kernel_buf` (used by both current paths)
+///   - `true`  → `bpf_probe_read_user_buf`   (reserved for future hooks)
 #[inline(always)]
 unsafe fn emit_tty_event(
     kind: u8,
