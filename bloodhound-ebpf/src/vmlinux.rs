@@ -91,3 +91,126 @@ pub struct task_struct {
     /// Offset: 0xc8c (3212)
     pub sessionid: u32,
 }
+
+// ── TTY structs ──────────────────────────────────────────────────────────────
+
+/// Minimal `tty_struct` layout for kernel 6.8.0-49-generic (x86_64).
+///
+/// Used by Layer 1 TTY hooks (`pty_write`, `n_tty_read`) to identify
+/// the underlying device class via `tty->driver->{type,subtype}` and
+/// drop events from non-pseudo-terminal devices (physical consoles,
+/// serial ports, etc.).
+///
+/// Field offsets (verified against upstream Linux 6.8 `include/linux/tty.h`):
+///
+/// | Field    | Offset (hex) | Offset (dec) | Notes                            |
+/// |----------|--------------|--------------|----------------------------------|
+/// | `driver` | 0x10         | 16           | `struct tty_driver *`            |
+///
+/// Layout (relevant prefix only):
+///
+/// ```c
+/// struct tty_struct {
+///     struct kref kref;                        // 4 bytes, off 0
+///     int index;                               // 4 bytes, off 4
+///     struct device *dev;                      // 8 bytes, off 8
+///     struct tty_driver *driver;               // 8 bytes, off 16  ← we read this
+///     struct tty_port *port;                   // 8 bytes, off 24
+///     ...
+/// };
+/// ```
+///
+/// # Verification
+///
+/// On the target VM:
+///
+/// ```sh
+/// pahole -C tty_struct /sys/kernel/btf/vmlinux | grep driver
+/// ```
+///
+/// Same regeneration caveat as `task_struct` above.
+///
+/// # Safety
+///
+/// Same rules as `task_struct`: never stack-allocate; only use as a
+/// pointee through `core::ptr::addr_of!` + `bpf_probe_read_kernel`.
+#[repr(C)]
+pub struct tty_struct {
+    /// Opaque padding: bytes 0x000 ..= 0x00f
+    /// Covers `kref` (4) + `index` (4) + `dev` (8).
+    _pad0: [u8; 0x10],
+
+    /// Pointer to the TTY driver descriptor. Used to inspect device
+    /// class via `driver->type` / `driver->subtype`.
+    /// Offset: 0x10 (16)
+    pub driver: *const tty_driver,
+    // Trailing fields (port, ops, ...) are intentionally omitted.
+}
+
+/// Minimal `tty_driver` layout for kernel 6.8.0-49-generic (x86_64).
+///
+/// Field offsets (verified against upstream Linux 6.8 `include/linux/tty_driver.h`):
+///
+/// | Field     | Offset (hex) | Offset (dec) | Notes                  |
+/// |-----------|--------------|--------------|------------------------|
+/// | `type`    | 0x38         | 56           | Device class (TTY/PTY) |
+/// | `subtype` | 0x3a         | 58           | Master vs slave PTY    |
+///
+/// Layout (relevant prefix):
+///
+/// ```c
+/// struct tty_driver {
+///     struct kref kref;          // 4 bytes, off 0
+///     // 4 bytes alignment padding
+///     struct cdev **cdevs;       // 8 bytes, off 8
+///     struct module *owner;      // 8 bytes, off 16
+///     const char *driver_name;   // 8 bytes, off 24
+///     const char *name;          // 8 bytes, off 32
+///     int name_base;             // 4 bytes, off 40
+///     int major;                 // 4 bytes, off 44
+///     int minor_start;           // 4 bytes, off 48
+///     unsigned int num;          // 4 bytes, off 52
+///     short type;                // 2 bytes, off 56  ← we read this
+///     short subtype;             // 2 bytes, off 58  ← we read this
+///     ...
+/// };
+/// ```
+///
+/// # Verification
+///
+/// On the target VM:
+///
+/// ```sh
+/// pahole -C tty_driver /sys/kernel/btf/vmlinux | grep -E 'type|subtype'
+/// ```
+#[repr(C)]
+pub struct tty_driver {
+    /// Opaque padding: bytes 0x00 ..= 0x37
+    /// Covers `kref` + alignment + `cdevs` + `owner` + `driver_name`
+    /// + `name` + `name_base` + `major` + `minor_start` + `num`.
+    _pad0: [u8; 0x38],
+
+    /// Device class identifier; `TTY_DRIVER_TYPE_PTY` (4) for
+    /// pseudo-terminals.
+    /// Offset: 0x38 (56)
+    pub r#type: i16,
+
+    /// Subtype within the class; `PTY_TYPE_SLAVE` (2) for the
+    /// pts/* end of a pseudo-terminal pair (the side connected
+    /// to the user shell over SSH).
+    /// Offset: 0x3a (58)
+    pub subtype: i16,
+    // Trailing fields are intentionally omitted.
+}
+
+// ── TTY device-class constants ───────────────────────────────────────────────
+//
+// Stable across all supported kernels (defined in `uapi/linux/tty.h`
+// and `include/linux/tty_driver.h`).
+
+/// `tty_driver.type` value indicating a pseudo-terminal pair.
+pub const TTY_DRIVER_TYPE_PTY: i16 = 0x0004;
+
+/// `tty_driver.subtype` value indicating the **slave** side of a pty
+/// pair (i.e. the `/dev/pts/N` device that the user shell talks to).
+pub const PTY_TYPE_SLAVE: i16 = 0x0002;
