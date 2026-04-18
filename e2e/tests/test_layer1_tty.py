@@ -142,6 +142,132 @@ class TestTtyRead:
         )
 
 
+class TestEmitEventClamp:
+    """Test the `MAX_TTY_DATA` clamp enforced by `emit_tty_event`.
+
+    The clamp is shared between the tty_write and tty_read paths
+    (`layer1_tty.rs`: `data_len = count.min(MAX_TTY_DATA - 1)`).
+    Issue #2 acceptance criterion §2 requires it be respected.
+
+    The kernel's `n_tty_read` caps per-call returns at ~4095 bytes
+    regardless of caller buffer size, so the tty_read path cannot
+    naturally deliver > `MAX_TTY_DATA` bytes in one call. We exercise
+    the clamp via the tty_write path instead — `pty_write` receives
+    whatever byte count the writer requested, up to arbitrary sizes —
+    and rely on the shared helper to prove the clamp works uniformly
+    for both event kinds.
+    """
+
+    def test_pty_write_clamps_at_max_tty_data(
+        self, bloodhound_events, wait_for_events
+    ):
+        """Large writes through `pty_write` must emit events whose decoded
+        `args.data` does not exceed `MAX_TTY_DATA - 1` (4095 bytes).
+
+        Opens a PTY pair inside the traced user's session, writes 5000
+        bytes (> MAX_TTY_DATA) to the slave side, and verifies:
+
+        1. The emitted `tty_write` event's decoded data length is exactly
+           `MAX_TTY_DATA - 1 = 4095` — the clamp was hit.
+        2. No other `tty_write` event anywhere exceeds the clamp (the
+           invariant across the whole stream).
+        """
+        MAX_TTY_DATA = 4096
+        payload_size = 5000
+        marker_prefix = b"TTY_WRITE_CLAMP_MARKER_f8c271_"
+        payload_pattern = marker_prefix + b"X" * (
+            payload_size - len(marker_prefix)
+        )
+        assert len(payload_pattern) == payload_size
+
+        # Script reads the payload from stdin (avoids shell-escaping a
+        # multi-KiB literal), opens a PTY pair, drains the master side
+        # in a background thread (so pty_write doesn't block on a full
+        # queue), and writes the payload to the slave side — which
+        # triggers `pty_write(slave_tty, buf, 5000)`. The BPF clamp at
+        # entry must limit the event's data to MAX_TTY_DATA - 1.
+        script = (
+            "import os, pty, sys, threading, time; "
+            "m, s = pty.openpty(); "
+            "def drain():\n"
+            "    try:\n"
+            "        while True:\n"
+            "            d = os.read(m, 8192)\n"
+            "            if not d:\n"
+            "                return\n"
+            "    except OSError:\n"
+            "        return\n"
+            "t = threading.Thread(target=drain, daemon=True); t.start(); "
+            f"payload = sys.stdin.buffer.read({payload_size}); "
+            f"assert len(payload) == {payload_size}, f\"stdin short: {{len(payload)}}\"; "
+            "n = os.write(s, payload); "
+            "sys.stdout.write(str(n)); "
+            "time.sleep(0.3); "
+            "os.close(s); os.close(m)"
+        )
+        import subprocess
+        full_cmd = [
+            "sshpass", "-p", "testpass",
+            "ssh", "-o", "StrictHostKeyChecking=no",
+            "-p", "2222",
+            "testuser@localhost",
+            f"python3 -c '{script}'",
+        ]
+        proc = subprocess.run(
+            full_cmd,
+            input=payload_pattern,
+            capture_output=True,
+            timeout=30,
+        )
+        assert proc.returncode == 0, (
+            f"Clamp test script failed: stdout={proc.stdout!r} "
+            f"stderr={proc.stderr!r}"
+        )
+        try:
+            bytes_written = int(proc.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            raise AssertionError(
+                f"Could not parse bytes-written from script output: "
+                f"{proc.stdout!r}"
+            )
+        assert bytes_written > MAX_TTY_DATA, (
+            f"Only {bytes_written} bytes written in one call; cannot "
+            f"exercise the MAX_TTY_DATA clamp. The test requires the "
+            f"single pty_write to be invoked with count > {MAX_TTY_DATA}."
+        )
+        wait_for_events(seconds=3)
+
+        tty_writes = filter_events(
+            bloodhound_events(), event_type="TTY", name="tty_write"
+        )
+
+        # Invariant: no tty_write event's decoded data exceeds MAX_TTY_DATA - 1.
+        for ev in tty_writes:
+            decoded = base64.b64decode(ev["args"]["data"])
+            assert len(decoded) <= MAX_TTY_DATA - 1, (
+                f"tty_write event exceeds MAX_TTY_DATA - 1 "
+                f"({MAX_TTY_DATA - 1}) clamp: decoded length = "
+                f"{len(decoded)}. Event: {ev}"
+            )
+
+        # Proof of exercise: the payload's marker must appear in at
+        # least one event whose decoded length is exactly the clamp
+        # boundary. This confirms the clamp path was actually reached
+        # — not merely passively satisfied by other small writes.
+        clamped_matches = [
+            ev for ev in tty_writes
+            if marker_prefix in base64.b64decode(ev["args"]["data"])
+            and len(base64.b64decode(ev["args"]["data"])) == MAX_TTY_DATA - 1
+        ]
+        assert len(clamped_matches) > 0, (
+            f"No tty_write event hit the clamp boundary "
+            f"({MAX_TTY_DATA - 1} bytes) with our marker prefix. "
+            f"Total tty_writes: {len(tty_writes)}. "
+            f"Sizes observed: "
+            f"{sorted(set(len(base64.b64decode(e['args']['data'])) for e in tty_writes))[-5:]}"
+        )
+
+
 class TestPtsFilter:
     """Test the pts/* device filter introduced by issue #12.
 
