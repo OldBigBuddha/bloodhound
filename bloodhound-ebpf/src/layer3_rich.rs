@@ -5,6 +5,7 @@ use aya_ebpf::{
 };
 use bloodhound_common::*;
 
+use crate::fd_ident::fd_to_dev_ino;
 use crate::filter::{get_task_info, should_trace};
 use crate::helpers::{emit_event, bpf_memcpy, increment_drop_count};
 use crate::maps::{
@@ -152,6 +153,14 @@ unsafe fn try_sys_exit_openat(ctx: &TracePointContext) -> Result<u32, i64> {
     let ret: i64 = ctx.read_at(16).map_err(|_| -1i64)?;
     let ed: OpenatEntryData =
         core::ptr::read_unaligned(entry.data.as_ptr() as *const OpenatEntryData);
+
+    // Resolve (dev, ino) from the returned fd. Negative return ⇒ open failed,
+    // skip the traversal and emit zeros (per issue #6 acceptance criteria).
+    let dev_ino = if ret >= 0 {
+        fd_to_dev_ino(ret as i32)
+    } else {
+        crate::fd_ident::DevIno::default()
+    };
 
     let filename_len = (ed.filename_len as usize).min(MAX_PATH_SIZE - 1);
 
@@ -843,3 +852,552 @@ unsafe fn try_exit_sendto_recvfrom(ctx: &TracePointContext) -> Result<u32, i64> 
 #[tracepoint] pub fn sys_exit_sendto(c: TracePointContext) -> u32 { match unsafe { try_exit_sendto_recvfrom(&c) } { Ok(_)|Err(_) => 0 } }
 #[tracepoint] pub fn sys_enter_recvfrom(c: TracePointContext) -> u32 { match unsafe { try_enter_sendto_recvfrom(&c, EventKind::Recvfrom as u8) } { Ok(_)|Err(_) => 0 } }
 #[tracepoint] pub fn sys_exit_recvfrom(c: TracePointContext) -> u32 { match unsafe { try_exit_sendto_recvfrom(&c) } { Ok(_)|Err(_) => 0 } }
+
+// ── dup / dup2 / dup3 / fcntl(F_DUPFD*) — issue #5 ───────────────────────────
+//
+// The four syscalls share a payload (`oldfd`, `newfd`, `cloexec`).
+// `oldfd` and `cloexec` are known at enter; `newfd` comes from the exit
+// return value. `fcntl` is gated on `cmd ∈ {F_DUPFD, F_DUPFD_CLOEXEC}`;
+// other commands are not stashed and fall through to Tier 1 raw capture.
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct DupEntryData {
+    oldfd: u32,
+    cloexec: u8,
+    _pad: [u8; 3],
+}
+
+#[tracepoint]
+pub fn sys_enter_dup(ctx: TracePointContext) -> u32 {
+    match unsafe { try_enter_dup_family(&ctx, EventKind::Dup as u8, 0) } { Ok(_)|Err(_) => 0 }
+}
+#[tracepoint]
+pub fn sys_exit_dup(ctx: TracePointContext) -> u32 {
+    match unsafe { try_exit_dup_family(&ctx) } { Ok(_)|Err(_) => 0 }
+}
+#[tracepoint]
+pub fn sys_enter_dup2(ctx: TracePointContext) -> u32 {
+    match unsafe { try_enter_dup_family(&ctx, EventKind::Dup2 as u8, 0) } { Ok(_)|Err(_) => 0 }
+}
+#[tracepoint]
+pub fn sys_exit_dup2(ctx: TracePointContext) -> u32 {
+    match unsafe { try_exit_dup_family(&ctx) } { Ok(_)|Err(_) => 0 }
+}
+#[tracepoint]
+pub fn sys_enter_dup3(ctx: TracePointContext) -> u32 {
+    match unsafe { try_enter_dup3(&ctx) } { Ok(_)|Err(_) => 0 }
+}
+#[tracepoint]
+pub fn sys_exit_dup3(ctx: TracePointContext) -> u32 {
+    match unsafe { try_exit_dup_family(&ctx) } { Ok(_)|Err(_) => 0 }
+}
+#[tracepoint]
+pub fn sys_enter_fcntl(ctx: TracePointContext) -> u32 {
+    match unsafe { try_enter_fcntl(&ctx) } { Ok(_)|Err(_) => 0 }
+}
+#[tracepoint]
+pub fn sys_exit_fcntl(ctx: TracePointContext) -> u32 {
+    match unsafe { try_exit_dup_family(&ctx) } { Ok(_)|Err(_) => 0 }
+}
+
+unsafe fn try_enter_dup_family(
+    ctx: &TracePointContext,
+    kind: u8,
+    cloexec: u8,
+) -> Result<u32, i64> {
+    if !should_trace() { return Ok(0); }
+    let oldfd: u64 = ctx.read_at(16).map_err(|_| -1i64)?;
+    stash_dup_entry(kind, oldfd as u32, cloexec)
+}
+
+unsafe fn try_enter_dup3(ctx: &TracePointContext) -> Result<u32, i64> {
+    if !should_trace() { return Ok(0); }
+    // dup3: offset 16=oldfd, 24=newfd, 32=flags
+    let oldfd: u64 = ctx.read_at(16).map_err(|_| -1i64)?;
+    let flags: u64 = ctx.read_at(32).unwrap_or(0);
+    let cloexec = if (flags as u32) & O_CLOEXEC != 0 { 1u8 } else { 0u8 };
+    stash_dup_entry(EventKind::Dup3 as u8, oldfd as u32, cloexec)
+}
+
+unsafe fn try_enter_fcntl(ctx: &TracePointContext) -> Result<u32, i64> {
+    if !should_trace() { return Ok(0); }
+    // fcntl: offset 16=fd, 24=cmd, 32=arg
+    let fd: u64 = ctx.read_at(16).map_err(|_| -1i64)?;
+    let cmd: u64 = ctx.read_at(24).unwrap_or(0);
+    let cmd32 = cmd as u32;
+    // Only rich-extract the F_DUPFD family. All other fcntl commands fall
+    // through to Tier 1 raw capture (the Tier 2 bitmap entry for fcntl is
+    // intentionally not set, so raw capture still emits the event).
+    if cmd32 != F_DUPFD && cmd32 != F_DUPFD_CLOEXEC {
+        return Ok(0);
+    }
+    let cloexec = if cmd32 == F_DUPFD_CLOEXEC { 1u8 } else { 0u8 };
+    stash_dup_entry(EventKind::Fcntl as u8, fd as u32, cloexec)
+}
+
+#[inline(always)]
+unsafe fn stash_dup_entry(kind: u8, oldfd: u32, cloexec: u8) -> Result<u32, i64> {
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let header = get_task_info(kind);
+    let entry_ptr = match SYSCALL_TMP_BUF.get_ptr_mut(0) {
+        Some(p) => p,
+        None => return Ok(0),
+    };
+    let entry = unsafe { &mut *entry_ptr };
+    entry.data_len = 0;
+    entry.header = header;
+    let ed = DupEntryData { oldfd, cloexec, _pad: [0; 3] };
+    core::ptr::copy_nonoverlapping(
+        &ed as *const _ as *const u8,
+        entry.data.as_mut_ptr(),
+        core::mem::size_of::<DupEntryData>(),
+    );
+    entry.data_len = core::mem::size_of::<DupEntryData>() as u16;
+    let _ = RICH_ENTRY_MAP.insert(&pid_tgid, &entry, 0);
+    Ok(0)
+}
+
+unsafe fn try_exit_dup_family(ctx: &TracePointContext) -> Result<u32, i64> {
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let entry = match RICH_ENTRY_MAP.get(&pid_tgid) {
+        Some(e) => *e,
+        None => return Ok(0),
+    };
+    let ret: i64 = ctx.read_at(16).map_err(|_| -1i64)?;
+    let ed: DupEntryData =
+        core::ptr::read_unaligned(entry.data.as_ptr() as *const DupEntryData);
+    let payload = DupPayload {
+        oldfd: ed.oldfd,
+        newfd: ret as i32,
+        cloexec: ed.cloexec,
+        _pad: [0; 3],
+        return_code: ret,
+    };
+    emit_fixed(&entry.header, &payload);
+    let _ = RICH_ENTRY_MAP.remove(&pid_tgid);
+    Ok(0)
+}
+
+// ── pread64 / pwrite64 — issue #7 ────────────────────────────────────────────
+//
+// Mirrors the read/write rich extractor with an additional `offset` argument.
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PreadPwriteEntryData {
+    fd: u32,
+    requested_size: u64,
+    offset: i64,
+    fd_type: u8,
+}
+
+#[tracepoint]
+pub fn sys_enter_pread64(ctx: TracePointContext) -> u32 {
+    match unsafe { try_enter_prw(&ctx, EventKind::Pread64 as u8) } { Ok(_)|Err(_) => 0 }
+}
+#[tracepoint]
+pub fn sys_exit_pread64(ctx: TracePointContext) -> u32 {
+    match unsafe { try_exit_prw(&ctx) } { Ok(_)|Err(_) => 0 }
+}
+#[tracepoint]
+pub fn sys_enter_pwrite64(ctx: TracePointContext) -> u32 {
+    match unsafe { try_enter_prw(&ctx, EventKind::Pwrite64 as u8) } { Ok(_)|Err(_) => 0 }
+}
+#[tracepoint]
+pub fn sys_exit_pwrite64(ctx: TracePointContext) -> u32 {
+    match unsafe { try_exit_prw(&ctx) } { Ok(_)|Err(_) => 0 }
+}
+
+unsafe fn try_enter_prw(ctx: &TracePointContext, kind: u8) -> Result<u32, i64> {
+    if !should_trace() { return Ok(0); }
+    // pread64/pwrite64: offset 16=fd, 24=buf, 32=count, 40=pos
+    let fd: u64 = ctx.read_at(16).map_err(|_| -1i64)?;
+    let count: u64 = ctx.read_at(32).unwrap_or(0);
+    let pos: u64 = ctx.read_at(40).unwrap_or(0);
+
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let header = get_task_info(kind);
+    let entry_ptr = match SYSCALL_TMP_BUF.get_ptr_mut(0) {
+        Some(p) => p,
+        None => return Ok(0),
+    };
+    let entry = unsafe { &mut *entry_ptr };
+    entry.data_len = 0;
+    entry.header = header;
+    let ed = PreadPwriteEntryData {
+        fd: fd as u32,
+        requested_size: count,
+        offset: pos as i64,
+        fd_type: FD_TYPE_OTHER,
+    };
+    core::ptr::copy_nonoverlapping(
+        &ed as *const _ as *const u8,
+        entry.data.as_mut_ptr(),
+        core::mem::size_of::<PreadPwriteEntryData>(),
+    );
+    entry.data_len = core::mem::size_of::<PreadPwriteEntryData>() as u16;
+    let _ = RICH_ENTRY_MAP.insert(&pid_tgid, &entry, 0);
+    Ok(0)
+}
+
+unsafe fn try_exit_prw(ctx: &TracePointContext) -> Result<u32, i64> {
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let entry = match RICH_ENTRY_MAP.get(&pid_tgid) {
+        Some(e) => *e,
+        None => return Ok(0),
+    };
+    let ret: i64 = ctx.read_at(16).map_err(|_| -1i64)?;
+    let ed: PreadPwriteEntryData =
+        core::ptr::read_unaligned(entry.data.as_ptr() as *const PreadPwriteEntryData);
+    let payload = PreadPwritePayload {
+        fd: ed.fd,
+        fd_type: ed.fd_type,
+        _pad: [0; 3],
+        requested_size: ed.requested_size,
+        offset: ed.offset,
+        return_code: ret,
+    };
+    emit_fixed(&entry.header, &payload);
+    let _ = RICH_ENTRY_MAP.remove(&pid_tgid);
+    Ok(0)
+}
+
+// ── readv / writev — issue #8 ────────────────────────────────────────────────
+//
+// Bounded iov traversal: sums `iov_len` across the first MAX_IOV_TRAVERSE
+// entries to produce a "total requested" approximation. Beyond the cap,
+// the `iov_truncated` flag tells consumers the size is a lower bound.
+//
+// **Verifier note**: the loop is unrolled to a fixed bound (8) precisely
+// because BPF rejects unbounded iteration. Each iteration costs one
+// `bpf_probe_read_user`.
+
+/// Layout of `struct iovec` in user memory: { void *iov_base; size_t iov_len; }
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct UserIovec {
+    iov_base: u64,
+    iov_len: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ReadvWritevEntryData {
+    fd: u32,
+    iov_count: u32,
+    iov_truncated: u8,
+    _pad: [u8; 3],
+    requested_size: u64,
+    fd_type: u8,
+}
+
+#[tracepoint]
+pub fn sys_enter_readv(ctx: TracePointContext) -> u32 {
+    match unsafe { try_enter_rwv(&ctx, EventKind::Readv as u8) } { Ok(_)|Err(_) => 0 }
+}
+#[tracepoint]
+pub fn sys_exit_readv(ctx: TracePointContext) -> u32 {
+    match unsafe { try_exit_rwv(&ctx) } { Ok(_)|Err(_) => 0 }
+}
+#[tracepoint]
+pub fn sys_enter_writev(ctx: TracePointContext) -> u32 {
+    match unsafe { try_enter_rwv(&ctx, EventKind::Writev as u8) } { Ok(_)|Err(_) => 0 }
+}
+#[tracepoint]
+pub fn sys_exit_writev(ctx: TracePointContext) -> u32 {
+    match unsafe { try_exit_rwv(&ctx) } { Ok(_)|Err(_) => 0 }
+}
+
+unsafe fn try_enter_rwv(ctx: &TracePointContext, kind: u8) -> Result<u32, i64> {
+    if !should_trace() { return Ok(0); }
+    // readv/writev: offset 16=fd, 24=iov, 32=iovcnt
+    let fd: u64 = ctx.read_at(16).map_err(|_| -1i64)?;
+    let iov_ptr: u64 = ctx.read_at(24).unwrap_or(0);
+    let iovcnt: u64 = ctx.read_at(32).unwrap_or(0);
+
+    let mut total: u64 = 0;
+    let traverse = if iovcnt > MAX_IOV_TRAVERSE as u64 {
+        MAX_IOV_TRAVERSE
+    } else {
+        iovcnt as u32
+    };
+    let truncated = if iovcnt > MAX_IOV_TRAVERSE as u64 { 1u8 } else { 0u8 };
+
+    if iov_ptr != 0 {
+        // Fully unrolled, fixed-bound loop. The verifier needs the upper
+        // bound to be a compile-time constant; `MAX_IOV_TRAVERSE = 8` is
+        // small enough to keep instruction count comfortably below 1 M.
+        let stride = core::mem::size_of::<UserIovec>() as u64;
+        let mut i: u32 = 0;
+        while i < MAX_IOV_TRAVERSE {
+            if i >= traverse {
+                break;
+            }
+            let entry_addr = iov_ptr + (i as u64) * stride;
+            if let Ok(iov) = bpf_probe_read_user(entry_addr as *const UserIovec) {
+                total = total.wrapping_add(iov.iov_len);
+            }
+            i += 1;
+        }
+    }
+
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let header = get_task_info(kind);
+    let entry_ptr = match SYSCALL_TMP_BUF.get_ptr_mut(0) {
+        Some(p) => p,
+        None => return Ok(0),
+    };
+    let entry = unsafe { &mut *entry_ptr };
+    entry.data_len = 0;
+    entry.header = header;
+    let ed = ReadvWritevEntryData {
+        fd: fd as u32,
+        iov_count: iovcnt as u32,
+        iov_truncated: truncated,
+        _pad: [0; 3],
+        requested_size: total,
+        fd_type: FD_TYPE_OTHER,
+    };
+    core::ptr::copy_nonoverlapping(
+        &ed as *const _ as *const u8,
+        entry.data.as_mut_ptr(),
+        core::mem::size_of::<ReadvWritevEntryData>(),
+    );
+    entry.data_len = core::mem::size_of::<ReadvWritevEntryData>() as u16;
+    let _ = RICH_ENTRY_MAP.insert(&pid_tgid, &entry, 0);
+    Ok(0)
+}
+
+unsafe fn try_exit_rwv(ctx: &TracePointContext) -> Result<u32, i64> {
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let entry = match RICH_ENTRY_MAP.get(&pid_tgid) {
+        Some(e) => *e,
+        None => return Ok(0),
+    };
+    let ret: i64 = ctx.read_at(16).map_err(|_| -1i64)?;
+    let ed: ReadvWritevEntryData =
+        core::ptr::read_unaligned(entry.data.as_ptr() as *const ReadvWritevEntryData);
+    let payload = ReadvWritevPayload {
+        fd: ed.fd,
+        fd_type: ed.fd_type,
+        iov_truncated: ed.iov_truncated,
+        _pad: [0; 2],
+        iov_count: ed.iov_count,
+        _pad2: [0; 4],
+        requested_size: ed.requested_size,
+        return_code: ret,
+    };
+    emit_fixed(&entry.header, &payload);
+    let _ = RICH_ENTRY_MAP.remove(&pid_tgid);
+    Ok(0)
+}
+
+// ── mmap (file-backed) — issue #10 ───────────────────────────────────────────
+//
+// Anonymous mappings (MAP_ANONYMOUS or fd == -1) are filtered at enter
+// before any expensive work, so they do not consume a ring buffer slot.
+// File-backed mappings carry the (dev, ino) of the underlying file via
+// the same fd_ident traversal used by openat (issue #6).
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct MmapEntryData {
+    fd: i32,
+    prot: u32,
+    flags: u32,
+    length: u64,
+    offset: u64,
+}
+
+#[tracepoint]
+pub fn sys_enter_mmap(ctx: TracePointContext) -> u32 {
+    match unsafe { try_enter_mmap(&ctx) } { Ok(_)|Err(_) => 0 }
+}
+#[tracepoint]
+pub fn sys_exit_mmap(ctx: TracePointContext) -> u32 {
+    match unsafe { try_exit_mmap(&ctx) } { Ok(_)|Err(_) => 0 }
+}
+
+unsafe fn try_enter_mmap(ctx: &TracePointContext) -> Result<u32, i64> {
+    if !should_trace() { return Ok(0); }
+    // mmap: offset 16=addr, 24=length, 32=prot, 40=flags, 48=fd, 56=offset
+    let length: u64 = ctx.read_at(24).unwrap_or(0);
+    let prot: u64 = ctx.read_at(32).unwrap_or(0);
+    let flags: u64 = ctx.read_at(40).unwrap_or(0);
+    let fd_raw: i64 = ctx.read_at(48).unwrap_or(-1);
+    let offset: u64 = ctx.read_at(56).unwrap_or(0);
+
+    // Cheap filter: skip anonymous mappings and fd == -1. The dominant
+    // mmap caller (malloc-class allocations) takes this path, keeping the
+    // ring-buffer cost bounded.
+    if fd_raw < 0 || (flags as u32) & MAP_ANONYMOUS != 0 {
+        return Ok(0);
+    }
+
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let header = get_task_info(EventKind::Mmap as u8);
+    let entry_ptr = match SYSCALL_TMP_BUF.get_ptr_mut(0) {
+        Some(p) => p,
+        None => return Ok(0),
+    };
+    let entry = unsafe { &mut *entry_ptr };
+    entry.data_len = 0;
+    entry.header = header;
+    let ed = MmapEntryData {
+        fd: fd_raw as i32,
+        prot: prot as u32,
+        flags: flags as u32,
+        length,
+        offset,
+    };
+    core::ptr::copy_nonoverlapping(
+        &ed as *const _ as *const u8,
+        entry.data.as_mut_ptr(),
+        core::mem::size_of::<MmapEntryData>(),
+    );
+    entry.data_len = core::mem::size_of::<MmapEntryData>() as u16;
+    let _ = RICH_ENTRY_MAP.insert(&pid_tgid, &entry, 0);
+    Ok(0)
+}
+
+unsafe fn try_exit_mmap(ctx: &TracePointContext) -> Result<u32, i64> {
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let entry = match RICH_ENTRY_MAP.get(&pid_tgid) {
+        Some(e) => *e,
+        None => return Ok(0),
+    };
+    let ret: i64 = ctx.read_at(16).map_err(|_| -1i64)?;
+    let ed: MmapEntryData =
+        core::ptr::read_unaligned(entry.data.as_ptr() as *const MmapEntryData);
+
+    // Resolve (dev, ino) from the fd captured at enter. Use the enter-time
+    // fd because the syscall return value is the mapped address, not an fd.
+    let dev_ino = fd_to_dev_ino(ed.fd);
+
+    let payload = MmapPayload {
+        fd: ed.fd,
+        prot: ed.prot,
+        flags: ed.flags,
+        _pad: [0; 4],
+        length: ed.length,
+        offset: ed.offset,
+        dev: dev_ino.dev,
+        ino: dev_ino.ino,
+        return_code: ret,
+    };
+    emit_fixed(&entry.header, &payload);
+    let _ = RICH_ENTRY_MAP.remove(&pid_tgid);
+    Ok(0)
+}
+
+// ── sendfile / splice (opt-in) — issue #9 ────────────────────────────────────
+//
+// These two syscalls move data between two fds. Rich extraction is gated
+// on a userspace flag (`--enable-rich-sendfile`); when the flag is not
+// set, the userspace loader does not attach these tracepoints and does
+// not register them in `TIER2_BITMAP`, so Tier 1 raw capture continues
+// to surface them. The BPF programs themselves are always compiled in.
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SendfileSpliceEntryData {
+    in_fd: u32,
+    out_fd: u32,
+    in_fd_type: u8,
+    out_fd_type: u8,
+    _pad: [u8; 2],
+    size: u64,
+}
+
+#[tracepoint]
+pub fn sys_enter_sendfile(ctx: TracePointContext) -> u32 {
+    match unsafe { try_enter_sendfile(&ctx) } { Ok(_)|Err(_) => 0 }
+}
+#[tracepoint]
+pub fn sys_exit_sendfile(ctx: TracePointContext) -> u32 {
+    match unsafe { try_exit_sendfile_splice(&ctx, EventKind::Sendfile as u8) } { Ok(_)|Err(_) => 0 }
+}
+#[tracepoint]
+pub fn sys_enter_splice(ctx: TracePointContext) -> u32 {
+    match unsafe { try_enter_splice(&ctx) } { Ok(_)|Err(_) => 0 }
+}
+#[tracepoint]
+pub fn sys_exit_splice(ctx: TracePointContext) -> u32 {
+    match unsafe { try_exit_sendfile_splice(&ctx, EventKind::Splice as u8) } { Ok(_)|Err(_) => 0 }
+}
+
+unsafe fn try_enter_sendfile(ctx: &TracePointContext) -> Result<u32, i64> {
+    if !should_trace() { return Ok(0); }
+    // sendfile: offset 16=out_fd, 24=in_fd, 32=offset(*), 40=count
+    let out_fd: u64 = ctx.read_at(16).map_err(|_| -1i64)?;
+    let in_fd: u64 = ctx.read_at(24).unwrap_or(0);
+    let count: u64 = ctx.read_at(40).unwrap_or(0);
+    stash_sendfile_splice_entry(EventKind::Sendfile as u8, in_fd as u32, out_fd as u32, count)
+}
+
+unsafe fn try_enter_splice(ctx: &TracePointContext) -> Result<u32, i64> {
+    if !should_trace() { return Ok(0); }
+    // splice: offset 16=fd_in, 24=off_in*, 32=fd_out, 40=off_out*, 48=len, 56=flags
+    let in_fd: u64 = ctx.read_at(16).map_err(|_| -1i64)?;
+    let out_fd: u64 = ctx.read_at(32).unwrap_or(0);
+    let len: u64 = ctx.read_at(48).unwrap_or(0);
+    stash_sendfile_splice_entry(EventKind::Splice as u8, in_fd as u32, out_fd as u32, len)
+}
+
+#[inline(always)]
+unsafe fn stash_sendfile_splice_entry(
+    kind: u8,
+    in_fd: u32,
+    out_fd: u32,
+    size: u64,
+) -> Result<u32, i64> {
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let header = get_task_info(kind);
+    let entry_ptr = match SYSCALL_TMP_BUF.get_ptr_mut(0) {
+        Some(p) => p,
+        None => return Ok(0),
+    };
+    let entry = unsafe { &mut *entry_ptr };
+    entry.data_len = 0;
+    entry.header = header;
+    let ed = SendfileSpliceEntryData {
+        in_fd,
+        out_fd,
+        in_fd_type: FD_TYPE_OTHER,
+        out_fd_type: FD_TYPE_OTHER,
+        _pad: [0; 2],
+        size,
+    };
+    core::ptr::copy_nonoverlapping(
+        &ed as *const _ as *const u8,
+        entry.data.as_mut_ptr(),
+        core::mem::size_of::<SendfileSpliceEntryData>(),
+    );
+    entry.data_len = core::mem::size_of::<SendfileSpliceEntryData>() as u16;
+    let _ = RICH_ENTRY_MAP.insert(&pid_tgid, &entry, 0);
+    Ok(0)
+}
+
+unsafe fn try_exit_sendfile_splice(ctx: &TracePointContext, _kind: u8) -> Result<u32, i64> {
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let entry = match RICH_ENTRY_MAP.get(&pid_tgid) {
+        Some(e) => *e,
+        None => return Ok(0),
+    };
+    let ret: i64 = ctx.read_at(16).map_err(|_| -1i64)?;
+    let ed: SendfileSpliceEntryData =
+        core::ptr::read_unaligned(entry.data.as_ptr() as *const SendfileSpliceEntryData);
+    let payload = SendfileSplicePayload {
+        in_fd: ed.in_fd,
+        out_fd: ed.out_fd,
+        in_fd_type: ed.in_fd_type,
+        out_fd_type: ed.out_fd_type,
+        _pad: [0; 6],
+        size: ed.size,
+        return_code: ret,
+    };
+    emit_fixed(&entry.header, &payload);
+    let _ = RICH_ENTRY_MAP.remove(&pid_tgid);
+    Ok(0)
+}
