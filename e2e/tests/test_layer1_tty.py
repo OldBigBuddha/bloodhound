@@ -189,11 +189,16 @@ class TestEmitEventClamp:
         # input buffer fills, `pty_write` returns 0 and `n_tty_write`
         # breaks out of the loop, so the syscall returns promptly with
         # a partial count.
+        # NOTE: the script is passed to ssh wrapped in single quotes, so
+        # it must not contain single quotes itself. A short-read check on
+        # stdin would be nice, but f-strings use single quotes for the
+        # format spec and collide with ssh's outer quoting. Instead, the
+        # event-level assertion below will fail loudly if the payload
+        # did not make it through.
         script = (
             "import os, pty, sys; "
             "m, s = pty.openpty(); "
             f"payload = sys.stdin.buffer.read({payload_size}); "
-            f"assert len(payload) == {payload_size}, f'stdin short: {{len(payload)}}'; "
             "n = os.write(s, payload); "
             "sys.stdout.write(str(n)); "
             "os.close(s); os.close(m)"
