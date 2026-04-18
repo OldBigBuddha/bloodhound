@@ -1,5 +1,5 @@
 use aya_ebpf::{
-    helpers::bpf_probe_read_kernel_buf,
+    helpers::{bpf_probe_read_kernel, bpf_probe_read_kernel_buf},
     macros::kprobe,
     programs::ProbeContext,
 };
@@ -8,6 +8,53 @@ use bloodhound_common::*;
 use crate::filter::{get_task_info, should_trace};
 use crate::helpers::emit_event;
 use crate::maps::{ASSEMBLY_BUF, SCRATCH_BUF};
+use crate::vmlinux::{tty_driver, tty_struct, PTY_TYPE_SLAVE, TTY_DRIVER_TYPE_PTY};
+
+// ── Pseudo-terminal device filter ────────────────────────────────────────────
+
+/// Returns `true` when the given `tty_struct *` represents the slave end
+/// of a pseudo-terminal pair (i.e. a `/dev/pts/N` device).
+///
+/// Per `docs/tracing.md` §Layer 1, only interactive SSH sessions (which
+/// allocate a pts pair) are in scope. Physical console TTYs (`tty1`–`6`),
+/// serial consoles, and other non-pty devices are deliberately excluded
+/// in BPF so that no irrelevant traffic reaches userspace.
+///
+/// Returns `false` on any read failure or null `driver` pointer — the
+/// safe direction is to drop the event when the device class cannot be
+/// determined.
+#[inline(always)]
+unsafe fn is_pts_slave(tty: *const tty_struct) -> bool {
+    if tty.is_null() {
+        return false;
+    }
+    // Read tty->driver (a pointer to struct tty_driver).
+    let driver_ptr_ptr = core::ptr::addr_of!((*tty).driver);
+    let driver: *const tty_driver = match bpf_probe_read_kernel(driver_ptr_ptr) {
+        Ok(d) => d,
+        Err(_) => return false,
+    };
+    if driver.is_null() {
+        return false;
+    }
+
+    // Read driver->type and driver->subtype.
+    let type_ptr = core::ptr::addr_of!((*driver).r#type);
+    let drv_type: i16 = match bpf_probe_read_kernel(type_ptr) {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    if drv_type != TTY_DRIVER_TYPE_PTY {
+        return false;
+    }
+
+    let subtype_ptr = core::ptr::addr_of!((*driver).subtype);
+    let drv_subtype: i16 = match bpf_probe_read_kernel(subtype_ptr) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    drv_subtype == PTY_TYPE_SLAVE
+}
 
 // ── kprobe:pty_write ─────────────────────────────────────────────────────────
 
@@ -43,6 +90,11 @@ unsafe fn try_tty_write(ctx: &ProbeContext) -> Result<u32, i64> {
     }
 
     // pty_write: arg0=tty_struct*, arg1=buf*, arg2=count
+    let tty: *const tty_struct = ctx.arg(0).ok_or(-1i64)?;
+    if !is_pts_slave(tty) {
+        return Ok(0);
+    }
+
     let buf_ptr: *const u8 = ctx.arg(1).ok_or(-1i64)?;
     let count: usize = ctx.arg(2).ok_or(-1i64)?;
 
@@ -78,6 +130,11 @@ unsafe fn try_tty_read(ctx: &ProbeContext) -> Result<u32, i64> {
     }
 
     // n_tty_read: arg0=tty_struct*, arg1=file*, arg2=buf*, arg3=count
+    let tty: *const tty_struct = ctx.arg(0).ok_or(-1i64)?;
+    if !is_pts_slave(tty) {
+        return Ok(0);
+    }
+
     let buf_ptr: *const u8 = ctx.arg(2).ok_or(-1i64)?;
     let count: usize = ctx.arg(3).ok_or(-1i64)?;
 
