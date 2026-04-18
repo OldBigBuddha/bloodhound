@@ -114,6 +114,12 @@ pub fn load_and_attach(args: &Cli) -> Result<aya::Ebpf> {
     //   Similarly, `tty_read` → `n_tty_read` for the read path.
     try_attach_kprobe(&mut bpf, "tty_write_probe", "pty_write");
     try_attach_kprobe(&mut bpf, "tty_read_probe", "n_tty_read");
+    // kretprobe on n_tty_read: captures the bytes that were actually
+    // written into the userspace buffer during the call. Without this
+    // attach, only metadata (no `data` field) is emitted for tty_read.
+    // Aya's KProbe wrapper handles both kprobe and kretprobe via the
+    // `kind` discriminator set by the `#[kretprobe]` macro.
+    try_attach_kprobe(&mut bpf, "tty_read_ret_probe", "n_tty_read");
 
     info!("Attaching TC hooks...");
     if let Err(e) = attach_tc_hooks(&mut bpf) {
