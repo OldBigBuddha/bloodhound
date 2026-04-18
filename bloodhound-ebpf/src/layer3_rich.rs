@@ -154,12 +154,25 @@ unsafe fn try_sys_exit_openat(ctx: &TracePointContext) -> Result<u32, i64> {
         core::ptr::read_unaligned(entry.data.as_ptr() as *const OpenatEntryData);
 
     let filename_len = (ed.filename_len as usize).min(MAX_PATH_SIZE - 1);
+
+    // For successful opens, resolve the returned fd to a (dev, ino) pair so
+    // downstream consumers can match on inode identity rather than path string
+    // (issue #6). Zero values indicate unresolved/failed opens.
+    let dev_ino = if ret >= 0 {
+        crate::fd_ident::fd_to_dev_ino(ret as i32)
+    } else {
+        crate::fd_ident::DevIno::default()
+    };
+
     let payload = OpenatPayload {
         flags: ed.flags,
         mode: ed.mode,
         filename_len: ed.filename_len,
         _pad: [0; 2],
         return_code: ret as i32,
+        _pad2: [0; 4],
+        dev: dev_ino.dev,
+        ino: dev_ino.ino,
     };
 
     if filename_len > 0 {

@@ -214,3 +214,97 @@ pub const TTY_DRIVER_TYPE_PTY: i16 = 0x0004;
 /// `tty_driver.subtype` value indicating the **slave** side of a pty
 /// pair (i.e. the `/dev/pts/N` device that the user shell talks to).
 pub const PTY_TYPE_SLAVE: i16 = 0x0002;
+
+// ── fd table → file → inode → super_block ────────────────────────────────────
+//
+// These types are used by the `fd_ident` helper to derive a (dev, ino) pair
+// from a file descriptor. Only the fields actually accessed are declared;
+// the rest is opaque padding sized to match the kernel layout on the target.
+//
+// **Important:** these definitions intentionally avoid embedding `task_struct`'s
+// `files_struct` pointer in `task_struct` itself. The `files_struct` pointer
+// is read with explicit `bpf_probe_read_kernel` calls from a known offset,
+// because slotting a `*mut files_struct` field into `task_struct` would
+// require sizing the padding precisely on every kernel.
+//
+// File descriptor table traversal:
+//
+//   task_struct *task                  (from bpf_get_current_task)
+//   files_struct *files = task->files  (offset stored in FILES_OFFSET_IN_TASK)
+//   fdtable *fdt = files->fdt          (offset 0x20 in files_struct on 6.8.x)
+//   file **fd_array = fdt->fd          (offset 0x08 in fdtable)
+//   file *f = fd_array[fd]
+//   inode *i = f->f_inode              (offset 0x20 in file on 6.8.x)
+//   super_block *sb = i->i_sb          (offset 0x28 in inode on 6.8.x)
+//   dev_t dev = sb->s_dev              (offset 0x00 in super_block)
+//   u64 ino  = i->i_ino                (offset 0x40 in inode on 6.8.x)
+//
+// All offsets are for kernel 6.8.0-49-generic, x86_64. When the target
+// kernel changes, regenerate via `pahole` (see top-of-file note for
+// the procedure).
+
+/// Offset of the `files_struct *files` field within `task_struct` on the
+/// target kernel. Used by the `fd_ident` helper to read the current
+/// process's file table without embedding a fully padded `task_struct`
+/// definition.
+///
+/// On kernel 6.8.0-49-generic, x86_64, this is 0xb20 (2848).
+/// Verify with: `pahole -C task_struct vmlinux | grep files`.
+pub const FILES_OFFSET_IN_TASK: usize = 0xb20;
+
+/// Linux `files_struct` (subset). `fdt` is a pointer to a `fdtable` describing
+/// the open file descriptor table.
+#[repr(C)]
+pub struct files_struct {
+    _pad0: [u8; 0x20],
+    /// File descriptor table pointer (offset 0x20).
+    pub fdt: *mut fdtable,
+}
+
+/// Linux `fdtable` (subset). `fd` is an array of `struct file *`, one per
+/// open fd in the process.
+#[repr(C)]
+pub struct fdtable {
+    /// Maximum fd index plus one (offset 0x00).
+    pub max_fds: u32,
+    _pad0: [u8; 4],
+    /// Pointer to the `struct file *` array indexed by fd (offset 0x08).
+    pub fd: *mut *mut file,
+}
+
+/// Linux `struct file` (subset). `f_inode` points to the inode of the open file.
+///
+/// Field layout for kernel 6.8.0-49-generic (x86_64):
+///   - 0x00 .. 0x20: opaque (refcount, ops, etc.)
+///   - 0x20: `struct inode *f_inode`
+#[repr(C)]
+pub struct file {
+    _pad0: [u8; 0x20],
+    /// Pointer to the underlying inode (offset 0x20).
+    pub f_inode: *mut inode,
+}
+
+/// Linux `struct inode` (subset). Carries `i_sb` (super_block) and `i_ino`.
+///
+/// Field layout for kernel 6.8.0-49-generic (x86_64):
+///   - 0x00 .. 0x28: opaque
+///   - 0x28: `struct super_block *i_sb`
+///   - 0x30 .. 0x40: opaque
+///   - 0x40: `unsigned long i_ino`
+#[repr(C)]
+pub struct inode {
+    _pad0: [u8; 0x28],
+    /// Pointer to the superblock the inode belongs to (offset 0x28).
+    pub i_sb: *mut super_block,
+    _pad1: [u8; 0x40 - 0x30],
+    /// Inode number (offset 0x40).
+    pub i_ino: u64,
+}
+
+/// Linux `struct super_block` (subset). Only `s_dev` is needed for
+/// device-major/minor identification.
+#[repr(C)]
+pub struct super_block {
+    /// Encoded device id (`MKDEV(major, minor)`). Offset 0x00.
+    pub s_dev: u32,
+}
