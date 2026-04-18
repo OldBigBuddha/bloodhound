@@ -170,8 +170,10 @@ beyond raw integer values:
 | Syscall              | Rich args extracted                           |
 |----------------------|-----------------------------------------------|
 | execve/execveat      | filename (string), argv (string array)        |
-| openat               | filename (string), flags (decoded)            |
+| openat               | filename, flags (decoded), dev, ino           |
 | read/write           | fd, fd_type, requested size                   |
+| pread64/pwrite64     | fd, fd_type, size, offset                     |
+| readv/writev         | fd, fd_type, total size, iov_count, iov_truncated |
 | connect              | sockaddr (addr, port, family)                 |
 | chdir                | path (string)                                 |
 | fchdir               | fd (userspace resolves via /proc)             |
@@ -189,6 +191,10 @@ beyond raw integer values:
 | truncate/ftruncate   | path or fd, length                            |
 | mount/umount2        | source (string), target (string), fstype      |
 | sendto/recvfrom      | fd, sockaddr (addr, port), size               |
+| dup/dup2/dup3        | oldfd, newfd, cloexec                         |
+| fcntl (F_DUPFD only) | oldfd, newfd, cloexec                         |
+| mmap (file-backed)   | fd, prot, flags, length, offset, dev, ino     |
+| sendfile, splice     | in_fd, out_fd, in_fd_type, out_fd_type, size — opt-in via `--enable-rich-sendfile` |
 
 Tier 2 events use `event.type = "TRACEPOINT"` with the appropriate
 `event.layer` (tooling for execve, behavior for all others).
@@ -213,6 +219,11 @@ same syscall invocation (see deduplication above).
 - truncate, ftruncate
 - mount, umount2
 - sendto, recvfrom
+- dup, dup2, dup3, fcntl (F_DUPFD/F_DUPFD_CLOEXEC only)
+- pread64, pwrite64
+- readv, writev (total iov size only, bounded traversal)
+- mmap (file-backed only — anonymous mappings filtered in BPF)
+- sendfile, splice (opt-in via `--enable-rich-sendfile`)
 
 **Layer 1 (kprobe):**
 - `kprobe:tty_read`, `kprobe:tty_write`
@@ -241,6 +252,40 @@ descriptor table. The type is classified as one of:
 
 This classification is included in `args` (e.g., `"fd_type": "pipe"`)
 and allows downstream consumers to filter noise from pipe I/O in pipelines.
+
+### File identity (dev, ino) for openat and mmap
+
+`openat` and file-backed `mmap` events include a `(dev, ino)` pair derived
+from the underlying inode at `sys_exit`. The traversal walks
+`task_struct → files_struct → fdtable → file → inode → super_block` using
+`bpf_probe_read_kernel`. The kernel offsets used are fixed at compile time
+to the target VM (kernel `6.8.0-49-generic`); when offsets cannot be read
+(unsupported kernel, NULL pointer in chain, or fd out of range), both
+fields are emitted as 0 and the userspace deserializer omits them from
+the JSON output.
+
+Consumers should match on `(dev, ino)` for symlink-resilient file identity.
+A `0` value means "unresolved", not "real inode 0".
+
+### Vectored I/O traversal cap
+
+`readv` and `writev` rich extraction sums `iov_len` across the first 8
+iovec entries (`MAX_IOV_TRAVERSE` in `bloodhound-common`). When
+`iov_count > 8`, the `iov_truncated` flag is set in the event and
+`args.size` is a lower bound on the requested transfer. The cap exists
+because the BPF verifier rejects unbounded loops; 8 covers virtually all
+real-world vectored I/O. `preadv` / `pwritev` and the `*v2` variants are
+out of scope for the current implementation.
+
+### sendfile / splice opt-in
+
+`sendfile` and `splice` perform zero-copy transfers between two fds and
+can dominate event volume on file-serving workloads (10K+ events/sec).
+Rich extraction is therefore opt-in via `--enable-rich-sendfile`. When
+disabled (the default), the BPF programs remain compiled but unattached
+and the syscalls flow through Tier 1 raw capture. When enabled, pair
+with `--ring-buffer-size` ≥ 32 MiB to avoid drops under sustained load
+(see `docs/data-pipeline.md`).
 
 ### Enter/Exit correlation
 

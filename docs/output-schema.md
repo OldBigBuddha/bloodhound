@@ -33,6 +33,17 @@ BehaviorEvent
 |   +-- flags    : [string]   (human-readable, e.g. ["O_RDONLY", "O_SYNC"])
 |   +-- data     : string     (raw TTY data, Base64 encoded)
 |   +-- fd_type  : string     (regular, pipe, socket, tty, other)
+|   +-- dev      : u64        (openat/mmap: encoded MKDEV(major, minor); omitted when 0)
+|   +-- ino      : u64        (openat/mmap: inode number; omitted when 0)
+|   +-- oldfd    : u32        (dup/dup2/dup3/fcntl-DUPFD: source fd)
+|   +-- newfd    : i32        (dup family: destination fd, == return value)
+|   +-- cloexec  : bool       (dup3 with O_CLOEXEC, fcntl(F_DUPFD_CLOEXEC))
+|   +-- offset   : i64        (pread64/pwrite64: file offset; mmap: file offset)
+|   +-- iov_count   : u32     (readv/writev: caller-supplied iov array length)
+|   +-- iov_truncated : bool  (readv/writev: true ⇒ args.size is a lower bound)
+|   +-- prot     : [string]   (mmap: ["PROT_READ", "PROT_WRITE", "PROT_EXEC"])
+|   +-- length   : u64        (mmap: requested mapping length in bytes)
+|   +-- in_fd, out_fd, in_fd_type, out_fd_type, size : sendfile/splice
 |   +-- ...      : (extensible per event type)
 |
 +-- return_code (OPTIONAL) : i32
