@@ -71,6 +71,14 @@ NDJSON to stdout.
 | Output schema       | DECIDED | BehaviorEvent (see docs/schema.json)             |
 
 
+## Known Limitations
+
+| Limitation              | Scope    | Notes                                           |
+|-------------------------|----------|-------------------------------------------------|
+| io_uring I/O coverage   | DEFERRED | I/O submitted via io_uring rings bypasses syscall tracepoints. `io_uring_setup`/`enter`/`register` remain visible via Tier 1 raw_syscalls; submitted operations are not. See `docs/tracing.md` §Known Limitations §io_uring observation gap. |
+| Protocol semantic parse | OUT OF SCOPE | DNS, TLS SNI, HTTP, etc. are emitted as raw packet bytes; downstream consumers parse. See `docs/tracing.md` §Protocol semantic extraction is out of scope. |
+
+
 ## Detailed Specifications
 
 | Document                                           | Contents                              |
@@ -162,3 +170,5 @@ Phase 4: Integration
 | 2026-02-26 | Decided TTY privacy: capture passwords as-is         |
 | 2026-02-26 | Split spec into docs/ directory by concern           |
 | 2026-02-26 | Decided E2E TTY test: expect for interactive SSH (PTY required) |
+| 2026-04-18 | Codified protocol semantic extraction (DNS/TLS/HTTP) as downstream responsibility |
+| 2026-04-18 | Documented io_uring as known observation blind spot                |
