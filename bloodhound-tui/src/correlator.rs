@@ -16,20 +16,27 @@ pub struct CommandGroup {
 /// Correlate events to commands based on timestamp windows.
 ///
 /// Each command defines a time window: from its end_timestamp to the
-/// next command's end_timestamp. All non-TTY events falling in that
-/// window are assigned to the command.
+/// next command's end_timestamp. All behavioural events falling in
+/// that window are assigned to the command.
+///
+/// TTY events (rendered separately as the command + output panes) and
+/// userspace-synthesised meta events (`LIFECYCLE`, `HEARTBEAT`) are
+/// excluded — they are not user-attributable and would inflate the
+/// detail pane's per-command event counts.
 ///
 /// Events before the first command go to a synthetic "[pre-session]" group.
 pub fn correlate(
     commands: &[CommandEntry],
     events: &[BehaviorEvent],
 ) -> Vec<CommandGroup> {
+    let is_correlated = |e: &BehaviorEvent| !e.is_tty() && !e.is_synthetic();
+
     if commands.is_empty() {
-        // No commands found: put all non-tty events in a single group
+        // No commands found: put all correlated events in a single group
         let event_indices: Vec<usize> = events
             .iter()
             .enumerate()
-            .filter(|(_, e)| !e.is_tty())
+            .filter(|(_, e)| is_correlated(e))
             .map(|(i, _)| i)
             .collect();
         return vec![CommandGroup {
@@ -41,11 +48,11 @@ pub fn correlate(
 
     let mut groups: Vec<CommandGroup> = Vec::with_capacity(commands.len() + 1);
 
-    // Collect non-tty event indices sorted by timestamp (they should already be)
+    // Collect correlated event indices sorted by timestamp (they should already be)
     let non_tty: Vec<(usize, f64)> = events
         .iter()
         .enumerate()
-        .filter(|(_, e)| !e.is_tty())
+        .filter(|(_, e)| is_correlated(e))
         .map(|(i, e)| (i, e.header.timestamp))
         .collect();
 
@@ -108,6 +115,10 @@ mod tests {
     }
 
     fn make_event_at(name: &str, ts: f64) -> BehaviorEvent {
+        make_typed_event_at("TRACEPOINT", name, ts)
+    }
+
+    fn make_typed_event_at(event_type: &str, name: &str, ts: f64) -> BehaviorEvent {
         BehaviorEvent {
             header: EventHeader {
                 timestamp: ts,
@@ -118,7 +129,7 @@ mod tests {
                 comm: "bash".to_string(),
             },
             event: EventType {
-                event_type: "TRACEPOINT".to_string(),
+                event_type: event_type.to_string(),
                 name: name.to_string(),
                 layer: "behavior".to_string(),
             },
@@ -190,5 +201,33 @@ mod tests {
         assert!(!all_indices.contains(&0)); // tty_read
         assert!(!all_indices.contains(&1)); // tty_write
         assert!(all_indices.contains(&2));  // execve
+    }
+
+    #[test]
+    fn test_synthetic_events_excluded() {
+        let commands = vec![make_cmd("ls", 1.0)];
+        let events = vec![
+            make_typed_event_at("LIFECYCLE", "process_start", 1.4),
+            make_typed_event_at("LIFECYCLE", "process_fork", 1.45),
+            make_typed_event_at("LIFECYCLE", "process_exit", 1.6),
+            make_typed_event_at("HEARTBEAT", "heartbeat", 1.7),
+            make_event_at("execve", 1.5),
+        ];
+
+        let groups = correlate(&commands, &events);
+        let all_indices: Vec<usize> = groups
+            .iter()
+            .flat_map(|g| &g.event_indices)
+            .copied()
+            .collect();
+        // LIFECYCLE / HEARTBEAT must not be counted per-command.
+        for i in 0..=3 {
+            assert!(
+                !all_indices.contains(&i),
+                "synthetic event at idx {} leaked into a group",
+                i
+            );
+        }
+        assert!(all_indices.contains(&4)); // execve
     }
 }
