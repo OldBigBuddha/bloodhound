@@ -93,14 +93,29 @@ def assert_no_event(
 
 
 def assert_auid_filter(events: list[dict], target_auid: int) -> None:
-    """Assert all events have the correct auid (or 0 for PACKET)."""
+    """Assert all events have the correct auid, with documented exceptions.
+
+    - PACKET events may legitimately carry auid=0 when packet→process
+      correlation fails (the socket tracking table has no match for the
+      5-tuple, e.g., short-lived processes).
+    - HEARTBEAT events carry auid=0 as a sentinel: the event is a
+      daemon-scoped pulse not attributable to any user process.
+    - LIFECYCLE events forward the triggering event's auid and therefore
+      match `target_auid` in normal operation.
+    """
     for event in events:
         auid = event.get("header", {}).get("auid", -1)
         event_type = event.get("event", {}).get("type", "")
         if event_type == "PACKET":
-            # PACKET events may have auid=target or auid=0
             assert auid in (target_auid, 0), (
                 f"PACKET event has unexpected auid={auid}"
+            )
+        elif event_type == "HEARTBEAT":
+            # HEARTBEAT is a daemon-scoped pulse; auid=0 is the
+            # documented sentinel (see docs/output-schema.md).
+            assert auid == 0, (
+                f"HEARTBEAT event has unexpected auid={auid} "
+                f"(expected 0 sentinel)"
             )
         else:
             assert auid == target_auid, (

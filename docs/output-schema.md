@@ -18,7 +18,7 @@ BehaviorEvent
 |   +-- comm         : string (max 16 bytes)
 |
 +-- event (REQUIRED)
-|   +-- type         : enum [SYSCALL, TTY, PACKET, KPROBE, TRACEPOINT, LSM]
+|   +-- type         : enum [SYSCALL, TTY, PACKET, KPROBE, TRACEPOINT, LSM, LIFECYCLE, HEARTBEAT]
 |   +-- name         : string (hook point name, e.g. "openat", "tty_read")
 |   +-- layer        : enum [intent, tooling, behavior]
 |
@@ -52,14 +52,16 @@ BehaviorEvent
 
 ## Layer-to-Event-Type Mapping
 
-| Layer    | event.type   | event.name examples                    |
-|----------|--------------|----------------------------------------|
-| intent   | TTY          | tty_read, tty_write                    |
-| tooling  | TRACEPOINT   | execve, execveat                       |
-| behavior | TRACEPOINT   | openat, read, write, connect, mkdir... |
-| behavior | SYSCALL      | (Tier 1 raw: syscall NR as name)       |
-| behavior | PACKET       | ingress, egress                        |
-| behavior | LSM          | file_open, task_kill, bpf, ...         |
+| Layer    | event.type   | event.name examples                          |
+|----------|--------------|----------------------------------------------|
+| intent   | TTY          | tty_read, tty_write                          |
+| tooling  | TRACEPOINT   | execve, execveat                             |
+| behavior | TRACEPOINT   | openat, read, write, connect, mkdir...       |
+| behavior | SYSCALL      | (Tier 1 raw: syscall NR as name)             |
+| behavior | PACKET       | ingress, egress                              |
+| behavior | LSM          | file_open, task_kill, bpf, ...               |
+| behavior | LIFECYCLE    | process_start, process_fork, process_exit    |
+| behavior | HEARTBEAT    | heartbeat                                    |
 
 
 ## Implementation Notes
@@ -97,3 +99,57 @@ DECIDED: Used for Tier 1 raw_syscalls events. These carry `syscall_nr`
 
 DECIDED: Reserved for future use. Not used in the current design. Kept
 in the schema for forward compatibility.
+
+### event.type LIFECYCLE
+
+DECIDED: Userspace-synthesised process-lifecycle events derived from
+the existing kernel event stream; no BPF capture added. `event.layer`
+is always `"behavior"`. Three `event.name` values:
+
+- `process_start` — emitted once, immediately before the first event
+  from a previously-unseen `pid`. Carries `args.start_time_ns` (from
+  `/proc/<pid>/stat` field 22 converted to wall-clock ns via
+  `/proc/stat` `btime` + the fixed 100 Hz tick rate). Best-effort
+  `args.main_executable` and `args.cwd` are included when `/proc/<pid>`
+  is still readable at observation time. When the process has already
+  exited, `args.partial = true` and `args.start_time_ns = 0`. The
+  `(pid, start_time_ns)` pair is the recommended stable identity to
+  defeat pid reuse within a session.
+
+- `process_fork` — emitted immediately after a successful `clone` or
+  `clone3` event (`return_code >= 0`) whose decoded flags do not
+  include `CLONE_THREAD`. Carries `args.parent_pid`, `args.child_pid`,
+  and `args.clone_flags` (the decoded flag array from the triggering
+  event, forwarded verbatim). Thread clones are deliberately filtered
+  out because they do not create a new process identity.
+
+- `process_exit` — emitted immediately after a Tier 1 raw-syscall
+  event for `exit_group` (syscall 231). Carries `args.pid` and
+  `args.exit_code` (from `raw_args[0]`). After emission, the pid is
+  removed from the first-seen set so a subsequent reuse of that pid
+  number produces a fresh `process_start` with a new `start_time_ns`.
+
+Ordering: `process_start` precedes the triggering event in the output
+stream; `process_fork` / `process_exit` follow it. FIFO relative to
+the triggering event is preserved.
+
+### event.type HEARTBEAT
+
+DECIDED: Periodic userspace-synthesised pulse. `event.layer =
+"behavior"`, `event.name = "heartbeat"`. Emitted every
+`--heartbeat-interval` seconds (default: 1.0; set to 0 to disable).
+
+The header fields `auid`, `sessionid`, `pid` are sentinel zeroes and
+`comm` is empty — `HEARTBEAT` is not attributable to a process.
+`args` carries:
+
+- `drop_count_delta` — drops observed since the previous heartbeat
+- `drop_count_total` — cumulative drops since daemon startup
+- `events_emitted_delta` — events serialised to stdout in the interval
+- `gap_detected` — present and `true` only when
+  `drop_count_delta > 0`; omitted otherwise so consumers can
+  fast-path on the flag's presence
+
+Downstream consumers should treat any interval between two
+`HEARTBEAT` events with `gap_detected = true` as *undecidable* for
+correlation — state accumulated across the gap may be incomplete.

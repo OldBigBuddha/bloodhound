@@ -23,4 +23,14 @@ pub struct Cli {
     /// `--ring-buffer-size` of at least 32 MiB to avoid drops under load.
     #[arg(long, default_value_t = false)]
     pub enable_rich_sendfile: bool,
+
+    /// Interval in seconds between synthesised `HEARTBEAT` events.
+    ///
+    /// Each heartbeat carries drop deltas and events-emitted deltas so
+    /// downstream consumers can mark intervals as `undecidable` when
+    /// ring-buffer drops occur within them. Set to `0` to disable
+    /// heartbeat emission entirely (consumers that do not expect
+    /// `HEARTBEAT` events can opt out).
+    #[arg(long, default_value_t = 1.0)]
+    pub heartbeat_interval: f64,
 }
