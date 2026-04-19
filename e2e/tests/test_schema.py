@@ -51,7 +51,11 @@ class TestSchemaValidation:
         wait_for_events()
 
         events = bloodhound_events()
-        allowed_types = {"SYSCALL", "TTY", "PACKET", "KPROBE", "TRACEPOINT", "LSM"}
+        allowed_types = {
+            "SYSCALL", "TTY", "PACKET", "KPROBE", "TRACEPOINT", "LSM",
+            # Userspace-synthesised types (see docs/output-schema.md).
+            "LIFECYCLE", "HEARTBEAT",
+        }
         for ev in events:
             assert ev["event"]["type"] in allowed_types, (
                 f"Invalid event type: {ev['event']['type']}"
