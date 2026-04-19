@@ -7,6 +7,7 @@ mod ui;
 
 use std::fs;
 use std::io;
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -23,6 +24,9 @@ use app::{App, ExecChild};
 use command_reconstructor::reconstruct_commands;
 use correlator::{correlate, CommandGroup};
 use event_model::BehaviorEvent;
+
+#[cfg(test)]
+mod render_tests;
 
 const FILE_SIZE_WARNING_BYTES: u64 = 50 * 1024 * 1024; // 50 MB
 
@@ -62,9 +66,27 @@ fn main() -> Result<()> {
         }
     }
 
-    // Parse NDJSON
-    let content = fs::read_to_string(&cli.file)
-        .with_context(|| format!("Cannot read file: {}", cli.file))?;
+    let tz_offset = FixedOffset::east_opt(parse_tz_offset(&cli.timezone)?)
+        .ok_or_else(|| anyhow::anyhow!("Invalid timezone offset: {}", cli.timezone))?;
+
+    let app = build_app_from_path(Path::new(&cli.file), tz_offset, None)?;
+
+    run_tui(app)
+}
+
+/// Build an [`App`] by parsing an NDJSON trace file.
+///
+/// Shared between the CLI entry point and render-level tests:
+/// `main()` uses this after handling the interactive size-warning prompt;
+/// snapshot tests call it directly with a pinned `boot_time_override`
+/// so wall-clock timestamps stay deterministic across checkouts.
+pub(crate) fn build_app_from_path(
+    path: &Path,
+    tz_offset: FixedOffset,
+    boot_time_override: Option<DateTime<Utc>>,
+) -> Result<App> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("Cannot read file: {}", path.display()))?;
 
     let mut events: Vec<BehaviorEvent> = Vec::new();
     let mut parse_errors = 0;
@@ -95,7 +117,7 @@ fn main() -> Result<()> {
     }
 
     if events.is_empty() {
-        bail!("No valid events found in {}", cli.file);
+        bail!("No valid events found in {}", path.display());
     }
 
     if parse_errors > 0 {
@@ -113,7 +135,6 @@ fn main() -> Result<()> {
         );
     }
 
-    // Sort events by timestamp
     events.sort_by(|a, b| {
         a.header
             .timestamp
@@ -140,7 +161,6 @@ fn main() -> Result<()> {
         })
         .collect();
 
-    // Reconstruct commands
     let commands = reconstruct_commands(&tty_writes);
 
     // Filter out empty commands: the \r\n double-flush and bracketed paste
@@ -151,27 +171,15 @@ fn main() -> Result<()> {
         .filter(|c| !c.command.trim().is_empty())
         .collect();
 
-    // Correlate events to commands
     let groups = correlate(&commands, &events);
-
-    // Build decoded TTY output per command group.
-    // For each group, collect tty_write data in the group's time window
-    // and decode it into printable text lines.
     let tty_output = build_tty_output(&groups, &events);
-
-    // Build execve process trees per command group.
     let exec_trees = build_exec_trees(&groups, &events);
 
-    // Extract file basename for display
-    let file_display = std::path::Path::new(&cli.file)
+    let file_display = path
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or(&cli.file)
-        .to_string();
-
-    // Parse timezone offset
-    let tz_offset = FixedOffset::east_opt(parse_tz_offset(&cli.timezone)?)
-        .ok_or_else(|| anyhow::anyhow!("Invalid timezone offset: {}", cli.timezone))?;
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned());
 
     // Compute boot time anchor.
     //
@@ -179,16 +187,26 @@ fn main() -> Result<()> {
     // To show wall-clock time, we anchor the last event's monotonic timestamp to the
     // file's modification time (= roughly when the daemon last wrote), then derive
     // the boot instant.  This gives approximate wall-clock timestamps for all events.
-    let file_mtime: DateTime<Utc> = fs::metadata(&cli.file)?
-        .modified()?
-        .into();
-    let last_mono = events.last().map(|e| e.header.timestamp).unwrap_or(0.0);
-    let boot_time_utc = file_mtime - chrono::Duration::milliseconds((last_mono * 1000.0) as i64);
+    //
+    // Tests override this to pin wall-clock output across checkouts.
+    let boot_time_utc = match boot_time_override {
+        Some(t) => t,
+        None => {
+            let file_mtime: DateTime<Utc> = fs::metadata(path)?.modified()?.into();
+            let last_mono = events.last().map(|e| e.header.timestamp).unwrap_or(0.0);
+            file_mtime - chrono::Duration::milliseconds((last_mono * 1000.0) as i64)
+        }
+    };
 
-    let app = App::new(groups, events, tty_output, exec_trees, file_display, boot_time_utc, tz_offset);
-
-    // Run TUI
-    run_tui(app)
+    Ok(App::new(
+        groups,
+        events,
+        tty_output,
+        exec_trees,
+        file_display,
+        boot_time_utc,
+        tz_offset,
+    ))
 }
 
 fn run_tui(mut app: App) -> Result<()> {
