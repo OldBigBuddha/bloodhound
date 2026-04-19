@@ -65,6 +65,12 @@ pub struct ExecChild {
     pub label: String,
     /// Process ID.
     pub pid: u32,
+    /// `/proc/<pid>/stat` field 22, converted to wall-clock ns, as
+    /// published by the most recent `LIFECYCLE/process_start` event
+    /// for this pid. `0` when the daemon did not synthesize a
+    /// lifecycle stream (older daemon version) — callers treat that
+    /// as "unknown, identity reverts to pid-only".
+    pub start_time_ns: u64,
     /// Tree depth (1 = direct child of shell, 2 = grandchild, etc.).
     pub depth: usize,
     /// Index into the global events array.
