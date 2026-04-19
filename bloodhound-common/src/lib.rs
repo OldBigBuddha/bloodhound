@@ -63,6 +63,17 @@ pub enum EventKind {
     Umount2 = 51,
     Sendto = 52,
     Recvfrom = 53,
+    Dup = 54,
+    Dup2 = 55,
+    Dup3 = 56,
+    Fcntl = 57,
+    Pread64 = 58,
+    Pwrite64 = 59,
+    Readv = 60,
+    Writev = 61,
+    Mmap = 62,
+    Sendfile = 63,
+    Splice = 64,
 
     // Packet capture (TC)
     PacketIngress = 100,
@@ -120,6 +131,17 @@ impl EventKind {
             51 => Some(Self::Umount2),
             52 => Some(Self::Sendto),
             53 => Some(Self::Recvfrom),
+            54 => Some(Self::Dup),
+            55 => Some(Self::Dup2),
+            56 => Some(Self::Dup3),
+            57 => Some(Self::Fcntl),
+            58 => Some(Self::Pread64),
+            59 => Some(Self::Pwrite64),
+            60 => Some(Self::Readv),
+            61 => Some(Self::Writev),
+            62 => Some(Self::Mmap),
+            63 => Some(Self::Sendfile),
+            64 => Some(Self::Splice),
             100 => Some(Self::PacketIngress),
             101 => Some(Self::PacketEgress),
             200 => Some(Self::LsmFileOpen),
@@ -217,6 +239,13 @@ pub struct OpenatPayload {
     pub filename_len: u16,
     pub _pad: [u8; 2],
     pub return_code: i32,
+    pub _pad2: [u8; 4],
+    /// Device of the underlying inode (kernel `s_dev`, encoded as `MKDEV(major, minor)`).
+    /// Zero when the open failed or identity resolution did not succeed.
+    pub dev: u64,
+    /// Inode number of the opened file. Zero when the open failed or
+    /// identity resolution did not succeed.
+    pub ino: u64,
     // Followed by: filename bytes
 }
 
@@ -459,6 +488,120 @@ impl Umount2Payload {
     pub const SIZE: usize = core::mem::size_of::<Self>();
 }
 
+// ── New Tier 2 Payloads (dup/fcntl, pread/pwrite, readv/writev, mmap, sendfile/splice) ─
+
+/// Payload for `dup`, `dup2`, `dup3`, and `fcntl(F_DUPFD*)` events.
+///
+/// `oldfd` is the source fd from `args[0]`. `newfd` is the destination fd
+/// from the syscall return value (negative on error). `cloexec` reflects
+/// whether the new fd has FD_CLOEXEC set: true for `dup3` with `O_CLOEXEC`
+/// and for `fcntl(F_DUPFD_CLOEXEC)`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct DupPayload {
+    pub oldfd: u32,
+    pub newfd: i32,
+    pub cloexec: u8,
+    pub _pad: [u8; 3],
+    pub return_code: i64,
+}
+
+impl DupPayload {
+    pub const SIZE: usize = core::mem::size_of::<Self>();
+}
+
+/// Payload for `pread64` and `pwrite64` events.
+///
+/// Mirrors `ReadWritePayload` plus the explicit `offset` argument.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct PreadPwritePayload {
+    pub fd: u32,
+    pub fd_type: u8,
+    pub _pad: [u8; 3],
+    pub requested_size: u64,
+    pub offset: i64,
+    pub return_code: i64,
+}
+
+impl PreadPwritePayload {
+    pub const SIZE: usize = core::mem::size_of::<Self>();
+}
+
+/// Payload for `readv` and `writev` events.
+///
+/// `requested_size` is the sum of `iov_len` across the first
+/// `MAX_IOV_TRAVERSE` iov entries. If `iov_count > MAX_IOV_TRAVERSE`,
+/// `iov_truncated` is 1 and `requested_size` underestimates the true total.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ReadvWritevPayload {
+    pub fd: u32,
+    pub fd_type: u8,
+    pub iov_truncated: u8,
+    pub _pad: [u8; 2],
+    pub iov_count: u32,
+    pub _pad2: [u8; 4],
+    pub requested_size: u64,
+    pub return_code: i64,
+}
+
+impl ReadvWritevPayload {
+    pub const SIZE: usize = core::mem::size_of::<Self>();
+}
+
+/// Maximum number of `iovec` entries traversed in BPF for `readv`/`writev`.
+///
+/// This bound exists for the BPF verifier: each iov entry costs one
+/// `bpf_probe_read_user` call, and the verifier rejects unbounded loops.
+/// Eight covers the overwhelming majority of real-world vectored I/O.
+pub const MAX_IOV_TRAVERSE: u32 = 8;
+
+/// Payload for `mmap` events (file-backed only).
+///
+/// Anonymous mappings are filtered in BPF and never reach userspace.
+/// `dev` and `ino` identify the underlying file via the same fd-table
+/// traversal used by `openat`. They are zero when identity resolution
+/// failed or the file backing was not resolvable.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct MmapPayload {
+    pub fd: i32,
+    pub prot: u32,
+    pub flags: u32,
+    pub _pad: [u8; 4],
+    pub length: u64,
+    pub offset: u64,
+    pub dev: u64,
+    pub ino: u64,
+    pub return_code: i64,
+}
+
+impl MmapPayload {
+    pub const SIZE: usize = core::mem::size_of::<Self>();
+}
+
+/// Payload for `sendfile` and `splice` events (opt-in).
+///
+/// Both syscalls move data between two fds; this payload surfaces both
+/// fds and their classified types alongside the requested and actual
+/// transferred byte counts.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct SendfileSplicePayload {
+    pub in_fd: u32,
+    pub out_fd: u32,
+    pub in_fd_type: u8,
+    pub out_fd_type: u8,
+    pub _pad: [u8; 6],
+    pub size: u64,
+    pub return_code: i64,
+}
+
+impl SendfileSplicePayload {
+    pub const SIZE: usize = core::mem::size_of::<Self>();
+}
+
 // ── LSM Payloads ─────────────────────────────────────────────────────────────
 
 #[repr(C)]
@@ -645,6 +788,30 @@ pub const NR_MOUNT: u64 = 165;
 pub const NR_UMOUNT2: u64 = 166;
 pub const NR_SENDTO: u64 = 44;
 pub const NR_RECVFROM: u64 = 45;
+pub const NR_DUP: u64 = 32;
+pub const NR_DUP2: u64 = 33;
+pub const NR_DUP3: u64 = 292;
+pub const NR_FCNTL: u64 = 72;
+pub const NR_PREAD64: u64 = 17;
+pub const NR_PWRITE64: u64 = 18;
+pub const NR_READV: u64 = 19;
+pub const NR_WRITEV: u64 = 20;
+pub const NR_MMAP: u64 = 9;
+pub const NR_SENDFILE: u64 = 40;
+pub const NR_SPLICE: u64 = 275;
+
+/// `fcntl` `cmd` values that perform fd duplication.
+///
+/// `F_DUPFD` and `F_DUPFD_CLOEXEC` are the only `fcntl` commands rich-extracted
+/// by Bloodhound; all other commands fall through to Tier 1 raw capture.
+pub const F_DUPFD: u32 = 0;
+pub const F_DUPFD_CLOEXEC: u32 = 1030;
+
+/// `mmap` `flags` bit indicating an anonymous mapping (no file backing).
+pub const MAP_ANONYMOUS: u32 = 0x20;
+
+/// `dup3` `flags` bit setting `FD_CLOEXEC` on the new fd.
+pub const O_CLOEXEC: u32 = 0o2000000;
 
 pub const TIER2_SYSCALLS: &[u64] = &[
     NR_EXECVE, NR_EXECVEAT, NR_OPENAT, NR_READ, NR_WRITE, NR_CONNECT,
@@ -653,6 +820,15 @@ pub const TIER2_SYSCALLS: &[u64] = &[
     NR_RMDIR, NR_SYMLINK, NR_SYMLINKAT, NR_LINK, NR_LINKAT, NR_CHMOD,
     NR_FCHMOD, NR_FCHMODAT, NR_CHOWN, NR_FCHOWN, NR_FCHOWNAT,
     NR_TRUNCATE, NR_FTRUNCATE, NR_MOUNT, NR_UMOUNT2, NR_SENDTO, NR_RECVFROM,
+    NR_DUP, NR_DUP2, NR_DUP3,
+    NR_PREAD64, NR_PWRITE64, NR_READV, NR_WRITEV, NR_MMAP,
+    // NR_FCNTL is intentionally omitted: rich extraction only fires for the
+    // F_DUPFD command family (see `try_enter_fcntl` in `layer3_rich.rs`).
+    // All other fcntl commands must remain visible via Tier 1 raw capture.
+    //
+    // NR_SENDFILE, NR_SPLICE are also intentionally omitted: they are opt-in
+    // via `--enable-rich-sendfile` and added to the bitmap at runtime only
+    // when the flag is set (see bloodhound::loader).
 ];
 
 // Bitmap size: 512 entries covers all syscalls on x86_64 (max ~450)
@@ -709,6 +885,17 @@ mod tests {
             EventKind::Umount2,
             EventKind::Sendto,
             EventKind::Recvfrom,
+            EventKind::Dup,
+            EventKind::Dup2,
+            EventKind::Dup3,
+            EventKind::Fcntl,
+            EventKind::Pread64,
+            EventKind::Pwrite64,
+            EventKind::Readv,
+            EventKind::Writev,
+            EventKind::Mmap,
+            EventKind::Sendfile,
+            EventKind::Splice,
             EventKind::PacketIngress,
             EventKind::PacketEgress,
             EventKind::LsmFileOpen,
@@ -737,7 +924,7 @@ mod tests {
     #[test]
     fn event_kind_unknown_returns_none() {
         // Test values that are not assigned to any variant
-        for byte in [4, 5, 9, 11, 19, 54, 99, 102, 150, 199, 207, 255] {
+        for byte in [4, 5, 9, 11, 19, 65, 99, 102, 150, 199, 207, 255] {
             assert_eq!(
                 EventKind::from_u8(byte),
                 None,
@@ -790,6 +977,17 @@ mod tests {
             EventKind::Umount2,
             EventKind::Sendto,
             EventKind::Recvfrom,
+            EventKind::Dup,
+            EventKind::Dup2,
+            EventKind::Dup3,
+            EventKind::Fcntl,
+            EventKind::Pread64,
+            EventKind::Pwrite64,
+            EventKind::Readv,
+            EventKind::Writev,
+            EventKind::Mmap,
+            EventKind::Sendfile,
+            EventKind::Splice,
             EventKind::PacketIngress,
             EventKind::PacketEgress,
             EventKind::LsmFileOpen,
@@ -869,6 +1067,14 @@ mod tests {
             mem::size_of::<LsmInodeRenamePayload>()
         );
         assert_eq!(LsmSetuidPayload::SIZE, mem::size_of::<LsmSetuidPayload>());
+        assert_eq!(DupPayload::SIZE, mem::size_of::<DupPayload>());
+        assert_eq!(PreadPwritePayload::SIZE, mem::size_of::<PreadPwritePayload>());
+        assert_eq!(ReadvWritevPayload::SIZE, mem::size_of::<ReadvWritevPayload>());
+        assert_eq!(MmapPayload::SIZE, mem::size_of::<MmapPayload>());
+        assert_eq!(
+            SendfileSplicePayload::SIZE,
+            mem::size_of::<SendfileSplicePayload>()
+        );
     }
 
     // ── Syscall metadata correctness ─────────────────────────────────────

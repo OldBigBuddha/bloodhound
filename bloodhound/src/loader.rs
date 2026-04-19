@@ -75,6 +75,14 @@ pub fn load_and_attach(args: &Cli) -> Result<aya::Ebpf> {
         ("umount2", NR_UMOUNT2),
         ("sendto", NR_SENDTO),
         ("recvfrom", NR_RECVFROM),
+        ("dup", NR_DUP),
+        ("dup2", NR_DUP2),
+        ("dup3", NR_DUP3),
+        ("pread64", NR_PREAD64),
+        ("pwrite64", NR_PWRITE64),
+        ("readv", NR_READV),
+        ("writev", NR_WRITEV),
+        ("mmap", NR_MMAP),
     ];
 
     let mut successful_syscalls = Vec::new();
@@ -93,6 +101,31 @@ pub fn load_and_attach(args: &Cli) -> Result<aya::Ebpf> {
                 successful_syscalls.push(*nr as u32);
             }
             info!("  Attached: {}", name);
+        }
+    }
+
+    // fcntl rich extraction is conditional on cmd ∈ {F_DUPFD, F_DUPFD_CLOEXEC};
+    // attach the tracepoints, but DO NOT register fcntl in TIER2_BITMAP, so
+    // non-DUPFD fcntl commands remain visible via Tier 1 raw capture.
+    let _ = try_attach_tracepoint(&mut bpf, "sys_enter_fcntl", "syscalls", "sys_enter_fcntl");
+    let _ = try_attach_tracepoint(&mut bpf, "sys_exit_fcntl", "syscalls", "sys_exit_fcntl");
+
+    // sendfile / splice rich extraction is opt-in (issue #9). When enabled,
+    // attach both tracepoint pairs and register the syscall numbers in
+    // TIER2_BITMAP so Tier 1 deduplicates. When disabled, the BPF programs
+    // remain compiled in but unattached, and Tier 1 raw capture continues.
+    if args.enable_rich_sendfile {
+        let sf_ok = try_attach_tracepoint(&mut bpf, "sys_enter_sendfile", "syscalls", "sys_enter_sendfile")
+            && try_attach_tracepoint(&mut bpf, "sys_exit_sendfile", "syscalls", "sys_exit_sendfile");
+        if sf_ok && (NR_SENDFILE as u32) < BITMAP_SIZE as u32 {
+            successful_syscalls.push(NR_SENDFILE as u32);
+            info!("  Attached: sendfile (opt-in via --enable-rich-sendfile)");
+        }
+        let sp_ok = try_attach_tracepoint(&mut bpf, "sys_enter_splice", "syscalls", "sys_enter_splice")
+            && try_attach_tracepoint(&mut bpf, "sys_exit_splice", "syscalls", "sys_exit_splice");
+        if sp_ok && (NR_SPLICE as u32) < BITMAP_SIZE as u32 {
+            successful_syscalls.push(NR_SPLICE as u32);
+            info!("  Attached: splice (opt-in via --enable-rich-sendfile)");
         }
     }
 

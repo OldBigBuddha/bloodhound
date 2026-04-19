@@ -120,6 +120,17 @@ fn deserialize_process_event(data: &[u8], kind: EventKind) -> Result<BehaviorEve
         EventKind::Umount2 => parse_path_event(payload, "umount2")?,
         EventKind::Sendto => parse_sendto_recvfrom(payload, "sendto")?,
         EventKind::Recvfrom => parse_sendto_recvfrom(payload, "recvfrom")?,
+        EventKind::Dup => parse_dup(payload, "dup")?,
+        EventKind::Dup2 => parse_dup(payload, "dup2")?,
+        EventKind::Dup3 => parse_dup(payload, "dup3")?,
+        EventKind::Fcntl => parse_dup(payload, "fcntl")?,
+        EventKind::Pread64 => parse_pread_pwrite(payload, "pread64")?,
+        EventKind::Pwrite64 => parse_pread_pwrite(payload, "pwrite64")?,
+        EventKind::Readv => parse_readv_writev(payload, "readv")?,
+        EventKind::Writev => parse_readv_writev(payload, "writev")?,
+        EventKind::Mmap => parse_mmap(payload)?,
+        EventKind::Sendfile => parse_sendfile_splice(payload, "sendfile")?,
+        EventKind::Splice => parse_sendfile_splice(payload, "splice")?,
         EventKind::LsmFileOpen => parse_lsm_simple(payload, "file_open")?,
         EventKind::LsmTaskKill => parse_lsm_task_kill(payload)?,
         EventKind::LsmBpf => parse_lsm_bpf(payload)?,
@@ -261,11 +272,19 @@ fn parse_openat(payload: &[u8]) -> Result<(String, String, String, Option<serde_
     let filename = extract_string(&var_data[..filename_len]);
     let flags = decode_open_flags(openat.flags);
 
-    let args = serde_json::json!({
+    // dev/ino are populated only when the open succeeded and the kernel
+    // fd-table traversal was successful. Zero ⇒ omit, so consumers can
+    // distinguish "unresolved" from "real inode 0 on dev 0".
+    let mut args = serde_json::json!({
         "filename": filename,
         "flags": flags,
         "mode": openat.mode,
     });
+    if openat.dev != 0 || openat.ino != 0 {
+        let obj = args.as_object_mut().expect("openat args is an object");
+        obj.insert("dev".into(), serde_json::Value::from(openat.dev));
+        obj.insert("ino".into(), serde_json::Value::from(openat.ino));
+    }
 
     Ok((
         "TRACEPOINT".into(),
@@ -495,6 +514,166 @@ fn parse_sendto_recvfrom(payload: &[u8], name: &str) -> Result<(String, String, 
     ))
 }
 
+fn parse_dup(
+    payload: &[u8],
+    name: &str,
+) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+    if payload.len() < DupPayload::SIZE {
+        bail!("Dup payload too short");
+    }
+    let d = unsafe { &*(payload.as_ptr() as *const DupPayload) };
+
+    let args = serde_json::json!({
+        "oldfd": d.oldfd,
+        "newfd": d.newfd,
+        "cloexec": d.cloexec != 0,
+    });
+
+    Ok((
+        "TRACEPOINT".into(),
+        name.into(),
+        "behavior".into(),
+        Some(args),
+        Some(d.return_code),
+    ))
+}
+
+fn parse_pread_pwrite(
+    payload: &[u8],
+    name: &str,
+) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+    if payload.len() < PreadPwritePayload::SIZE {
+        bail!("PreadPwrite payload too short");
+    }
+    let p = unsafe { &*(payload.as_ptr() as *const PreadPwritePayload) };
+
+    let fd_type_str = match p.fd_type {
+        FD_TYPE_REGULAR => "regular",
+        FD_TYPE_PIPE => "pipe",
+        FD_TYPE_SOCKET => "socket",
+        FD_TYPE_TTY => "tty",
+        _ => "other",
+    };
+
+    let args = serde_json::json!({
+        "fd": p.fd,
+        "fd_type": fd_type_str,
+        "size": p.requested_size,
+        "offset": p.offset,
+    });
+
+    Ok((
+        "TRACEPOINT".into(),
+        name.into(),
+        "behavior".into(),
+        Some(args),
+        Some(p.return_code),
+    ))
+}
+
+fn parse_readv_writev(
+    payload: &[u8],
+    name: &str,
+) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+    if payload.len() < ReadvWritevPayload::SIZE {
+        bail!("ReadvWritev payload too short");
+    }
+    let p = unsafe { &*(payload.as_ptr() as *const ReadvWritevPayload) };
+
+    let fd_type_str = match p.fd_type {
+        FD_TYPE_REGULAR => "regular",
+        FD_TYPE_PIPE => "pipe",
+        FD_TYPE_SOCKET => "socket",
+        FD_TYPE_TTY => "tty",
+        _ => "other",
+    };
+
+    let args = serde_json::json!({
+        "fd": p.fd,
+        "fd_type": fd_type_str,
+        "size": p.requested_size,
+        "iov_count": p.iov_count,
+        "iov_truncated": p.iov_truncated != 0,
+    });
+
+    Ok((
+        "TRACEPOINT".into(),
+        name.into(),
+        "behavior".into(),
+        Some(args),
+        Some(p.return_code),
+    ))
+}
+
+fn parse_mmap(
+    payload: &[u8],
+) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+    if payload.len() < MmapPayload::SIZE {
+        bail!("Mmap payload too short");
+    }
+    let p = unsafe { &*(payload.as_ptr() as *const MmapPayload) };
+
+    let mut args = serde_json::json!({
+        "fd": p.fd,
+        "prot": decode_mmap_prot(p.prot),
+        "flags": decode_mmap_flags(p.flags),
+        "length": p.length,
+        "offset": p.offset,
+    });
+    if p.dev != 0 || p.ino != 0 {
+        let obj = args.as_object_mut().expect("mmap args is an object");
+        obj.insert("dev".into(), serde_json::Value::from(p.dev));
+        obj.insert("ino".into(), serde_json::Value::from(p.ino));
+    }
+
+    Ok((
+        "TRACEPOINT".into(),
+        "mmap".into(),
+        "behavior".into(),
+        Some(args),
+        Some(p.return_code),
+    ))
+}
+
+fn parse_sendfile_splice(
+    payload: &[u8],
+    name: &str,
+) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+    if payload.len() < SendfileSplicePayload::SIZE {
+        bail!("SendfileSplice payload too short");
+    }
+    let p = unsafe { &*(payload.as_ptr() as *const SendfileSplicePayload) };
+
+    let in_type = fd_type_to_str(p.in_fd_type);
+    let out_type = fd_type_to_str(p.out_fd_type);
+
+    let args = serde_json::json!({
+        "in_fd": p.in_fd,
+        "out_fd": p.out_fd,
+        "in_fd_type": in_type,
+        "out_fd_type": out_type,
+        "size": p.size,
+    });
+
+    Ok((
+        "TRACEPOINT".into(),
+        name.into(),
+        "behavior".into(),
+        Some(args),
+        Some(p.return_code),
+    ))
+}
+
+fn fd_type_to_str(t: u8) -> &'static str {
+    match t {
+        FD_TYPE_REGULAR => "regular",
+        FD_TYPE_PIPE => "pipe",
+        FD_TYPE_SOCKET => "socket",
+        FD_TYPE_TTY => "tty",
+        _ => "other",
+    }
+}
+
 fn parse_lsm_simple(payload: &[u8], name: &str) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
     let return_code = if payload.len() >= 8 {
         let p = unsafe { &*(payload.as_ptr() as *const LsmFileOpenPayload) };
@@ -649,6 +828,44 @@ fn decode_open_flags(flags: u32) -> Vec<String> {
     if flags & 0o200000 != 0 { result.push("O_DIRECTORY".into()); }
     if flags & 0o400000 != 0 { result.push("O_NOFOLLOW".into()); }
     if flags & 0o2000000 != 0 { result.push("O_CLOEXEC".into()); }
+    result
+}
+
+fn decode_mmap_prot(prot: u32) -> Vec<String> {
+    let mut result = Vec::new();
+    if prot == 0 {
+        result.push("PROT_NONE".into());
+        return result;
+    }
+    if prot & 0x1 != 0 { result.push("PROT_READ".into()); }
+    if prot & 0x2 != 0 { result.push("PROT_WRITE".into()); }
+    if prot & 0x4 != 0 { result.push("PROT_EXEC".into()); }
+    if result.is_empty() { result.push(format!("0x{:x}", prot)); }
+    result
+}
+
+fn decode_mmap_flags(flags: u32) -> Vec<String> {
+    let mut result = Vec::new();
+    // MAP_SHARED=0x01, MAP_PRIVATE=0x02 are mutually exclusive
+    match flags & 0x3 {
+        0x01 => result.push("MAP_SHARED".into()),
+        0x02 => result.push("MAP_PRIVATE".into()),
+        0x03 => result.push("MAP_SHARED_VALIDATE".into()),
+        _ => {}
+    }
+    if flags & 0x10 != 0 { result.push("MAP_FIXED".into()); }
+    if flags & 0x20 != 0 { result.push("MAP_ANONYMOUS".into()); }
+    if flags & 0x100 != 0 { result.push("MAP_GROWSDOWN".into()); }
+    if flags & 0x800 != 0 { result.push("MAP_DENYWRITE".into()); }
+    if flags & 0x1000 != 0 { result.push("MAP_EXECUTABLE".into()); }
+    if flags & 0x2000 != 0 { result.push("MAP_LOCKED".into()); }
+    if flags & 0x4000 != 0 { result.push("MAP_NORESERVE".into()); }
+    if flags & 0x8000 != 0 { result.push("MAP_POPULATE".into()); }
+    if flags & 0x10000 != 0 { result.push("MAP_NONBLOCK".into()); }
+    if flags & 0x20000 != 0 { result.push("MAP_STACK".into()); }
+    if flags & 0x40000 != 0 { result.push("MAP_HUGETLB".into()); }
+    if flags & 0x100000 != 0 { result.push("MAP_FIXED_NOREPLACE".into()); }
+    if result.is_empty() { result.push(format!("0x{:x}", flags)); }
     result
 }
 
@@ -915,6 +1132,7 @@ mod tests {
     fn openat_classification() {
         let payload = OpenatPayload {
             flags: 0, mode: 0, filename_len: 0, _pad: [0; 2], return_code: 0,
+            _pad2: [0; 4], dev: 0, ino: 0,
         };
         let event = deserialize(&build_event(EventKind::Openat, &payload)).unwrap();
         assert_eq!(event.event.event_type, "TRACEPOINT");
@@ -1012,6 +1230,9 @@ mod tests {
             filename_len: path.len() as u16,
             _pad: [0; 2],
             return_code: 3,
+            _pad2: [0; 4],
+            dev: 0,
+            ino: 0,
         };
         let data = build_event_with_vardata(EventKind::Openat, &payload, path);
         let event = deserialize(&data).unwrap();
@@ -1019,6 +1240,48 @@ mod tests {
         let args = event.args.unwrap();
         assert_eq!(args["filename"], "/etc/passwd");
         assert_eq!(event.return_code, Some(3));
+    }
+
+    /// Openat events with non-zero (dev, ino) must surface them in args.
+    #[test]
+    fn openat_surfaces_dev_ino_when_present() {
+        let path = b"/etc/passwd\0";
+        let payload = OpenatPayload {
+            flags: 0,
+            mode: 0,
+            filename_len: path.len() as u16,
+            _pad: [0; 2],
+            return_code: 3,
+            _pad2: [0; 4],
+            dev: 0xfd00,
+            ino: 12345,
+        };
+        let data = build_event_with_vardata(EventKind::Openat, &payload, path);
+        let event = deserialize(&data).unwrap();
+        let args = event.args.unwrap();
+        assert_eq!(args["dev"], 0xfd00u64);
+        assert_eq!(args["ino"], 12345u64);
+    }
+
+    /// Openat events with zero (dev, ino) must omit those fields.
+    #[test]
+    fn openat_omits_dev_ino_when_zero() {
+        let path = b"/etc/passwd\0";
+        let payload = OpenatPayload {
+            flags: 0,
+            mode: 0,
+            filename_len: path.len() as u16,
+            _pad: [0; 2],
+            return_code: -1,
+            _pad2: [0; 4],
+            dev: 0,
+            ino: 0,
+        };
+        let data = build_event_with_vardata(EventKind::Openat, &payload, path);
+        let event = deserialize(&data).unwrap();
+        let args = event.args.unwrap();
+        assert!(args.get("dev").is_none());
+        assert!(args.get("ino").is_none());
     }
 
     /// Path events (chdir, mkdir, unlink, etc.) must extract the path.
@@ -1433,6 +1696,9 @@ mod golden_tests {
             filename_len: path.len() as u16,
             _pad: [0; 2],
             return_code: 3,
+            _pad2: [0; 4],
+            dev: 0xfd00,
+            ino: 100200,
         };
         let mut buf = build(EventKind::Openat, &payload_bytes(&payload));
         buf.extend_from_slice(path);

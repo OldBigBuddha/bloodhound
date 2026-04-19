@@ -1,15 +1,17 @@
 ---
 source: bloodhound/src/deserializer.rs
-assertion_line: 1441
+assertion_line: 1704
 expression: to_json(&event)
 ---
 {
   "args": {
+    "dev": 64768,
     "filename": "/etc/passwd",
     "flags": [
       "O_RDWR",
       "O_CREAT"
     ],
+    "ino": 100200,
     "mode": 420
   },
   "event": {
