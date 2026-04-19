@@ -43,8 +43,8 @@
       "properties": {
         "type": {
           "type": "string",
-          "enum": ["SYSCALL", "TTY", "PACKET", "KPROBE", "TRACEPOINT", "LSM"],
-          "description": "The source/nature of the event."
+          "enum": ["SYSCALL", "TTY", "PACKET", "KPROBE", "TRACEPOINT", "LSM", "LIFECYCLE", "HEARTBEAT"],
+          "description": "The source/nature of the event. LIFECYCLE events are userspace-synthesised process-lifecycle signals (process_start, process_fork, process_exit). HEARTBEAT events are periodic userspace-synthesised pulses carrying drop deltas for undecidable-interval detection."
         },
         "name": {
           "type": "string",

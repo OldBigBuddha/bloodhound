@@ -3,6 +3,8 @@ mod consumer;
 mod deserializer;
 mod drop_counter;
 mod enricher;
+mod heartbeat;
+mod lifecycle;
 mod loader;
 mod packet_correlator;
 mod serializer;
@@ -12,10 +14,13 @@ use anyhow::Result;
 use aya::maps::ring_buf::RingBuf;
 use clap::Parser;
 use log::info;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
 use cli::Cli;
+use deserializer::BehaviorEvent;
+use lifecycle::LifecycleSynthesizer;
 use packet_correlator::PacketCorrelator;
 use serializer::Serializer;
 
@@ -55,11 +60,46 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Set up packet correlator and serializer
+    // Synthesized-event channel for userspace-generated events
+    // (lifecycle announcements and heartbeats). Kept separate from the
+    // ring-buffer `event_rx` so the main select! can interleave both
+    // sources without either starving the other.
+    let (syn_tx, mut syn_rx) = mpsc::channel::<BehaviorEvent>(64);
+
+    // Heartbeat task: periodic synthesized events carrying drop deltas
+    // and emission counts so downstream consumers can mark intervals
+    // as undecidable when drops occurred.
+    let events_emitted = heartbeat::new_events_emitted_counter();
+    let heartbeat_tx = syn_tx.clone();
+    let heartbeat_drops = drop_count.clone();
+    let heartbeat_emitted = events_emitted.clone();
+    let heartbeat_interval = Duration::from_secs_f64(args.heartbeat_interval);
+    tokio::spawn(async move {
+        heartbeat::run_heartbeat(
+            heartbeat_interval,
+            heartbeat_drops,
+            heartbeat_emitted,
+            heartbeat_tx,
+        )
+        .await;
+    });
+
+    // Set up packet correlator, lifecycle synthesizer, and serializer
     let mut correlator = PacketCorrelator::new(args.uid);
+    let mut lifecycle_synth = LifecycleSynthesizer::new();
     let mut output = Serializer::new();
 
     let drain_timeout = Duration::from_secs(5);
+
+    // Helper: serialise an event and bump the emitted counter that
+    // heartbeat samples for its `events_emitted_delta` field.
+    let write_counted = |out: &mut Serializer<_>, ev: &BehaviorEvent| {
+        if let Err(e) = out.write_event(ev) {
+            eprintln!("Failed to write event: {}", e);
+            return;
+        }
+        events_emitted.fetch_add(1, Ordering::Relaxed);
+    };
 
     // Main event processing loop
     loop {
@@ -80,15 +120,34 @@ async fn main() -> Result<()> {
                             correlator.record_socket(&event);
                         }
 
-                        // Serialize to stdout
-                        if let Err(e) = output.write_event(&event) {
-                            eprintln!("Failed to write event: {}", e);
+                        // `process_start` precedes the first event
+                        // from a pid so consumers see the identity
+                        // anchor before any behavioural event.
+                        for precursor in lifecycle_synth.before(&event) {
+                            write_counted(&mut output, &precursor);
+                        }
+
+                        // Serialize the original event
+                        write_counted(&mut output, &event);
+
+                        // `process_fork` / `process_exit` follow the
+                        // triggering clone/exit_group, preserving
+                        // FIFO ordering with respect to the stream.
+                        for followup in lifecycle_synth.after(&event) {
+                            write_counted(&mut output, &followup);
                         }
                     }
                     Err(e) => {
                         eprintln!("Failed to deserialize event: {}", e);
                     }
                 }
+            }
+
+            Some(syn_event) = syn_rx.recv() => {
+                // Heartbeat and any other userspace-synthesised events
+                // share the same serialiser; ordering with raw events
+                // is FIFO-per-source, determined by select! wake order.
+                write_counted(&mut output, &syn_event);
             }
 
             _ = shutdown_rx.recv() => {
@@ -104,7 +163,13 @@ async fn main() -> Result<()> {
                                 if event.event.event_type == "PACKET" {
                                     correlator.correlate(&mut event);
                                 }
+                                for precursor in lifecycle_synth.before(&event) {
+                                    let _ = output.write_event(&precursor);
+                                }
                                 let _ = output.write_event(&event);
+                                for followup in lifecycle_synth.after(&event) {
+                                    let _ = output.write_event(&followup);
+                                }
                             }
                         }
                         _ = tokio::time::sleep_until(deadline) => break,
