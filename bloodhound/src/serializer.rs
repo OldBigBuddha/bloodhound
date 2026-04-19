@@ -1,15 +1,22 @@
 use crate::deserializer::BehaviorEvent;
-use std::io::{self, BufWriter, Write};
+use std::io::{self, LineWriter, Write};
 
-/// Buffered NDJSON writer.
+/// Line-buffered NDJSON writer.
+///
+/// Wraps the underlying writer in a `LineWriter` so the buffer is
+/// flushed at every `\n`, i.e. once per event. Low-rate synthesised
+/// events (`HEARTBEAT` every 1s, sporadic `LIFECYCLE`) were otherwise
+/// trapped in an 8 KiB `BufWriter` and never reached downstream
+/// consumers until hundreds of such events accumulated — which for
+/// `HEARTBEAT` meant ~10 minutes of invisibility in quiet sessions.
 pub struct Serializer<W: Write> {
-    writer: BufWriter<W>,
+    writer: LineWriter<W>,
 }
 
 impl Serializer<io::Stdout> {
     pub fn new() -> Self {
         Self {
-            writer: BufWriter::new(io::stdout()),
+            writer: LineWriter::new(io::stdout()),
         }
     }
 }
@@ -18,7 +25,7 @@ impl<W: Write> Serializer<W> {
     /// Create a serializer writing to an arbitrary writer.
     pub fn with_writer(writer: W) -> Self {
         Self {
-            writer: BufWriter::new(writer),
+            writer: LineWriter::new(writer),
         }
     }
 
