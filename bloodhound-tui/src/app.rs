@@ -146,17 +146,33 @@ pub struct App {
     pub process_expanded: HashSet<usize>,
 }
 
+/// Inputs required to construct an [`App`].
+///
+/// Grouped into a single struct so callers do not have to thread eight
+/// positional arguments through the NDJSON loader.
+pub struct AppInit {
+    pub commands: Vec<CommandGroup>,
+    pub events: Vec<BehaviorEvent>,
+    pub tty_output: Vec<Vec<String>>,
+    pub exec_trees: Vec<Vec<ExecChild>>,
+    pub file_path: String,
+    pub boot_time_utc: DateTime<Utc>,
+    pub tz_offset: FixedOffset,
+    pub fd_table: HashMap<(u32, u32), String>,
+}
+
 impl App {
-    pub fn new(
-        commands: Vec<CommandGroup>,
-        events: Vec<BehaviorEvent>,
-        tty_output: Vec<Vec<String>>,
-        exec_trees: Vec<Vec<ExecChild>>,
-        file_path: String,
-        boot_time_utc: DateTime<Utc>,
-        tz_offset: FixedOffset,
-        fd_table: HashMap<(u32, u32), String>,
-    ) -> Self {
+    pub fn new(init: AppInit) -> Self {
+        let AppInit {
+            commands,
+            events,
+            tty_output,
+            exec_trees,
+            file_path,
+            boot_time_utc,
+            tz_offset,
+            fd_table,
+        } = init;
         let total_events = events.len();
         let expanded = vec![false; commands.len()];
         Self {
@@ -318,10 +334,8 @@ impl App {
                 has_children,
                 ..
             } => {
-                if *has_children {
-                    if !self.process_expanded.remove(event_idx) {
-                        self.process_expanded.insert(*event_idx);
-                    }
+                if *has_children && !self.process_expanded.remove(event_idx) {
+                    self.process_expanded.insert(*event_idx);
                 }
             }
             ProcessTreeRow::Child { .. } => {
