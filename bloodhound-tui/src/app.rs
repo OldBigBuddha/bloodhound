@@ -16,21 +16,19 @@ pub enum Pane {
 /// Which tab is active in the detail (bottom-right) pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
-    All,
-    Exec,
-    Syscall,
+    Process,
+    Security,
     Files,
     Network,
 }
 
 impl Tab {
-    pub const ALL_TABS: [Tab; 5] = [Tab::All, Tab::Exec, Tab::Syscall, Tab::Files, Tab::Network];
+    pub const ALL_TABS: [Tab; 4] = [Tab::Process, Tab::Security, Tab::Files, Tab::Network];
 
     pub fn label(&self) -> &'static str {
         match self {
-            Tab::All => "All",
-            Tab::Exec => "Exec",
-            Tab::Syscall => "Syscall",
+            Tab::Process => "Process",
+            Tab::Security => "Security",
             Tab::Files => "Files",
             Tab::Network => "Network",
         }
@@ -38,19 +36,20 @@ impl Tab {
 
     pub fn index(&self) -> usize {
         match self {
-            Tab::All => 0,
-            Tab::Exec => 1,
-            Tab::Syscall => 2,
-            Tab::Files => 3,
-            Tab::Network => 4,
+            Tab::Process => 0,
+            Tab::Security => 1,
+            Tab::Files => 2,
+            Tab::Network => 3,
         }
     }
 
     pub fn matches(&self, category: EventCategory) -> bool {
+        if category == EventCategory::Hidden {
+            return false;
+        }
         match self {
-            Tab::All => true,
-            Tab::Exec => category == EventCategory::Exec,
-            Tab::Syscall => category == EventCategory::Syscall,
+            Tab::Process => category == EventCategory::Process,
+            Tab::Security => category == EventCategory::Security,
             Tab::Files => category == EventCategory::Files,
             Tab::Network => category == EventCategory::Network,
         }
@@ -152,7 +151,7 @@ impl App {
             expanded,
             history_cursor: 0,
             active_pane: Pane::History,
-            active_tab: Tab::All,
+            active_tab: Tab::Process,
             output_scroll: 0,
             detail_scroll: 0,
             file_path,

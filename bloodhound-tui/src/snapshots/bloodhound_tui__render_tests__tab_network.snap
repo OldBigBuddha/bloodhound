@@ -1,6 +1,5 @@
 ---
 source: bloodhound-tui/src/render_tests.rs
-assertion_line: 160
 expression: render(&app)
 ---
 "┌ History (10 commands) ─────────────────┐┌ Output (0 lines) ──────────────────────────────────────────────────────────────────────────────┐"
@@ -18,7 +17,7 @@ expression: render(&app)
 "│                                        ││                                                                                                │"
 "│                                        │└────────────────────────────────────────────────────────────────────────────────────────────────┘"
 "│                                        │┌ Events ────────────────────────────────────────────────────────────────────────────────────────┐"
-"│                                        ││ 1:All │ 2:Exec │ 3:Syscall │ 4:Files │ 5:Network                                               │"
+"│                                        ││ 1:Process │ 2:Security │ 3:Files │ 4:Network                                                   │"
 "│                                        │└────────────────────────────────────────────────────────────────────────────────────────────────┘"
 "│                                        ││ NET   socket (pid:291 rc=3)                                                                    │"
 "│                                        ││ NET   connect :0 (pid:291 rc=0)                                                                │"
@@ -42,4 +41,4 @@ expression: render(&app)
 "│                                        ││ NET   sendto :0 (pid:295 rc=123)                                                               │"
 "│                                        ││ NET   recvfrom :0 (pid:295 rc=66)                                                              │"
 "└────────────────────────────────────────┘└────────────────────────────────────────────────────────────────────────────────────────────────┘"
-" 01_file_exploration.ndjson  │ 17164 events total │ Command 1/10 │ 13299 events │ ▶ History   j/k:nav  ⏎:expand  Tab:pane  1-5:tab  q:quit  "
+" 01_file_exploration.ndjson  │ 17164 events total │ Command 1/10 │ 13299 events │ ▶ History   j/k:nav  ⏎:expand  Tab:pane  1-4:tab  q:quit  "

@@ -103,24 +103,38 @@ pub struct ProcInfo {
 /// Event category for tab filtering in the detail pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventCategory {
-    Exec,
-    Syscall,
+    Process,
+    Security,
     Files,
     Network,
+    /// Events that should not appear in any tab (tty shown in Output pane,
+    /// raw Layer 2 syscalls are too low-level for user-facing display).
+    Hidden,
 }
 
 impl BehaviorEvent {
     /// Categorize this event for tab filtering.
     pub fn category(&self) -> EventCategory {
         match self.event.name.as_str() {
-            "execve" | "execveat" => EventCategory::Exec,
+            "execve" | "execveat" | "clone" | "clone3" => EventCategory::Process,
+
             "ingress" | "egress" | "connect" | "bind" | "listen" | "socket" | "sendto"
             | "recvfrom" => EventCategory::Network,
-            "openat" | "mkdir" | "mkdirat" | "rmdir" | "unlink" | "unlinkat" | "rename"
-            | "renameat2" | "symlink" | "symlinkat" | "link" | "linkat" | "chmod" | "fchmod"
-            | "fchmodat" | "chown" | "fchown" | "fchownat" | "truncate" | "ftruncate"
-            | "chdir" | "fchdir" | "mount" | "umount2" => EventCategory::Files,
-            _ => EventCategory::Syscall,
+
+            "openat" | "read" | "write" | "mkdir" | "mkdirat" | "rmdir" | "unlink"
+            | "unlinkat" | "rename" | "renameat2" | "symlink" | "symlinkat" | "link"
+            | "linkat" | "chmod" | "fchmod" | "fchmodat" | "chown" | "fchown" | "fchownat"
+            | "truncate" | "ftruncate" | "chdir" | "fchdir" | "mount" | "umount2"
+            | "file_open" | "inode_unlink" | "inode_rename" => EventCategory::Files,
+
+            "task_kill" | "bpf" | "ptrace_access_check" | "task_fix_setuid" => {
+                EventCategory::Security
+            }
+
+            "tty_read" | "tty_write" => EventCategory::Hidden,
+            _ if self.event.event_type == "SYSCALL" => EventCategory::Hidden,
+
+            _ => EventCategory::Security,
         }
     }
 
@@ -205,6 +219,24 @@ impl BehaviorEvent {
                 (self.event.name.as_str(), detail)
             }
 
+            "clone" | "clone3" => {
+                let detail = self
+                    .args
+                    .as_ref()
+                    .and_then(|a| a.get("flags"))
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join("|")
+                    })
+                    .filter(|s| !s.is_empty())
+                    .map(|s| format!(" ({})", s))
+                    .unwrap_or_default();
+                ("FORK", detail)
+            }
+
             // openat → READ / WRITE based on flags.
             "openat" => {
                 if let Some(args) = &self.args {
@@ -250,6 +282,51 @@ impl BehaviorEvent {
             "fchdir" => ("CHDIR", self.format_fd_detail()),
             "mount" => ("MOUNT", self.format_two_path_detail()),
             "umount2" => ("UMOUNT", self.format_path_detail()),
+
+            "file_open" => ("OPEN", " (LSM)".to_string()),
+            "inode_unlink" => ("DELETE", " (LSM)".to_string()),
+            "inode_rename" => ("RENAME", " (LSM)".to_string()),
+
+            "task_kill" => {
+                let detail = if let Some(args) = &self.args {
+                    let target = args.get("target_pid").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let sig = args.get("signal").and_then(|v| v.as_u64()).unwrap_or(0);
+                    format!(" pid={} sig={}", target, sig)
+                } else {
+                    String::new()
+                };
+                ("KILL", detail)
+            }
+            "bpf" => {
+                let detail = self
+                    .args
+                    .as_ref()
+                    .and_then(|a| a.get("cmd"))
+                    .and_then(|v| v.as_u64())
+                    .map(|c| format!(" cmd={}", c))
+                    .unwrap_or_default();
+                ("BPF", detail)
+            }
+            "ptrace_access_check" => {
+                let detail = self
+                    .args
+                    .as_ref()
+                    .and_then(|a| a.get("target_pid"))
+                    .and_then(|v| v.as_u64())
+                    .map(|p| format!(" pid={}", p))
+                    .unwrap_or_default();
+                ("PTRACE", detail)
+            }
+            "task_fix_setuid" => {
+                let detail = if let Some(args) = &self.args {
+                    let old_uid = args.get("old_uid").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let new_uid = args.get("new_uid").and_then(|v| v.as_u64()).unwrap_or(0);
+                    format!(" uid:{}→{}", old_uid, new_uid)
+                } else {
+                    String::new()
+                };
+                ("SETUID", detail)
+            }
 
             "connect" | "bind" | "sendto" | "recvfrom" => {
                 let detail = if let Some(args) = &self.args {
@@ -359,9 +436,11 @@ mod tests {
     }
 
     #[test]
-    fn test_category_exec() {
-        assert_eq!(make_event("TRACEPOINT", "execve").category(), EventCategory::Exec);
-        assert_eq!(make_event("TRACEPOINT", "execveat").category(), EventCategory::Exec);
+    fn test_category_process() {
+        assert_eq!(make_event("TRACEPOINT", "execve").category(), EventCategory::Process);
+        assert_eq!(make_event("TRACEPOINT", "execveat").category(), EventCategory::Process);
+        assert_eq!(make_event("TRACEPOINT", "clone").category(), EventCategory::Process);
+        assert_eq!(make_event("TRACEPOINT", "clone3").category(), EventCategory::Process);
     }
 
     #[test]
@@ -374,11 +453,24 @@ mod tests {
     fn test_category_files() {
         assert_eq!(make_event("TRACEPOINT", "openat").category(), EventCategory::Files);
         assert_eq!(make_event("TRACEPOINT", "mkdir").category(), EventCategory::Files);
+        assert_eq!(make_event("LSM", "file_open").category(), EventCategory::Files);
+        assert_eq!(make_event("LSM", "inode_unlink").category(), EventCategory::Files);
+        assert_eq!(make_event("LSM", "inode_rename").category(), EventCategory::Files);
     }
 
     #[test]
-    fn test_category_syscall() {
-        assert_eq!(make_event("SYSCALL", "42").category(), EventCategory::Syscall);
+    fn test_category_security() {
+        assert_eq!(make_event("LSM", "task_kill").category(), EventCategory::Security);
+        assert_eq!(make_event("LSM", "bpf").category(), EventCategory::Security);
+        assert_eq!(make_event("LSM", "ptrace_access_check").category(), EventCategory::Security);
+        assert_eq!(make_event("LSM", "task_fix_setuid").category(), EventCategory::Security);
+    }
+
+    #[test]
+    fn test_category_hidden() {
+        assert_eq!(make_event("TTY", "tty_read").category(), EventCategory::Hidden);
+        assert_eq!(make_event("TTY", "tty_write").category(), EventCategory::Hidden);
+        assert_eq!(make_event("SYSCALL", "42").category(), EventCategory::Hidden);
     }
 
     #[test]
@@ -393,7 +485,7 @@ mod tests {
         let event: BehaviorEvent = serde_json::from_str(json).unwrap();
         assert_eq!(event.header.pid, 1234);
         assert_eq!(event.event.name, "execve");
-        assert_eq!(event.category(), EventCategory::Exec);
+        assert_eq!(event.category(), EventCategory::Process);
     }
 
     #[test]

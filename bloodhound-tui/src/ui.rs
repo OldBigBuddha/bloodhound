@@ -14,8 +14,8 @@ const HIGHLIGHT_COLOR: Color = Color::Rgb(97, 175, 239);   // Soft blue
 const ACTIVE_BORDER: Color = Color::Rgb(97, 175, 239);     // Blue
 const INACTIVE_BORDER: Color = Color::Rgb(90, 90, 90);     // Dim gray
 const TAB_ACTIVE: Color = Color::Rgb(97, 175, 239);        // Blue
-const EXEC_COLOR: Color = Color::Rgb(152, 195, 121);       // Green
-const SYSCALL_COLOR: Color = Color::Rgb(198, 120, 221);    // Purple
+const PROCESS_COLOR: Color = Color::Rgb(152, 195, 121);    // Green
+const SECURITY_COLOR: Color = Color::Rgb(198, 120, 221);   // Purple
 const FILES_COLOR: Color = Color::Rgb(229, 192, 123);      // Yellow
 const NETWORK_COLOR: Color = Color::Rgb(224, 108, 117);    // Red
 const DIM_TEXT: Color = Color::Rgb(120, 120, 120);          // Dim
@@ -291,20 +291,23 @@ fn draw_detail_pane(f: &mut Frame, app: &App, area: Rect) {
 
     let items: Vec<ListItem> = detail_events
         .iter()
+        .filter(|(_, event)| event.category() != EventCategory::Hidden)
         .map(|(_, event)| {
             let cat = event.category();
             let color = match cat {
-                EventCategory::Exec => EXEC_COLOR,
-                EventCategory::Syscall => SYSCALL_COLOR,
+                EventCategory::Process => PROCESS_COLOR,
+                EventCategory::Security => SECURITY_COLOR,
                 EventCategory::Files => FILES_COLOR,
                 EventCategory::Network => NETWORK_COLOR,
+                EventCategory::Hidden => unreachable!(),
             };
 
             let tag = match cat {
-                EventCategory::Exec => "EXEC",
-                EventCategory::Syscall => "SYS ",
+                EventCategory::Process => "PROC",
+                EventCategory::Security => "SEC ",
                 EventCategory::Files => "FILE",
                 EventCategory::Network => "NET ",
+                EventCategory::Hidden => unreachable!(),
             };
 
             let summary = event.summary_line(Some(&app.fd_table));
@@ -395,7 +398,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "   j/k:nav  ⏎:expand  Tab:pane  1-5:tab  q:quit ",
+            "   j/k:nav  ⏎:expand  Tab:pane  1-4:tab  q:quit ",
             Style::default().fg(DIM_TEXT),
         ),
     ]);

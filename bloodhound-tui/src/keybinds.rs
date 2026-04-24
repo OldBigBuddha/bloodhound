@@ -31,11 +31,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Tab => app.toggle_pane(),
 
         // Tab switching by number
-        KeyCode::Char('1') => app.set_tab(Tab::All),
-        KeyCode::Char('2') => app.set_tab(Tab::Exec),
-        KeyCode::Char('3') => app.set_tab(Tab::Syscall),
-        KeyCode::Char('4') => app.set_tab(Tab::Files),
-        KeyCode::Char('5') => app.set_tab(Tab::Network),
+        KeyCode::Char('1') => app.set_tab(Tab::Process),
+        KeyCode::Char('2') => app.set_tab(Tab::Security),
+        KeyCode::Char('3') => app.set_tab(Tab::Files),
+        KeyCode::Char('4') => app.set_tab(Tab::Network),
 
         // Tab cycling with 'h'/'l' in detail pane
         KeyCode::Char('l') | KeyCode::Right => {
