@@ -307,7 +307,7 @@ fn draw_detail_pane(f: &mut Frame, app: &App, area: Rect) {
                 EventCategory::Network => "NET ",
             };
 
-            let summary = event.summary_line();
+            let summary = event.summary_line(Some(&app.fd_table));
             let line = Line::from(vec![
                 Span::styled(
                     format!(" {} ", tag),

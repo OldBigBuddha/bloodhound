@@ -1,6 +1,5 @@
 ---
 source: bloodhound-tui/src/render_tests.rs
-assertion_line: 160
 expression: render(&app)
 ---
 "┌ History (10 commands) ─────────────────┐┌ Output (0 lines) ──────────────────────────────────────────────────────────────────────────────┐"
@@ -24,7 +23,7 @@ expression: render(&app)
 "│                                        ││ SYS   262 (pid:291 rc=0)                                                                       │"
 "│                                        ││ SYS   5 (pid:291 rc=0)                                                                         │"
 "│                                        ││ SYS   8 (pid:291 rc=0)                                                                         │"
-"│                                        ││ SYS   read (pid:291 rc=1265)                                                                   │"
+"│                                        ││ SYS   READ /etc/passwd (4096b) (pid:291 rc=1265)                                               │"
 "│                                        ││ SYS   3 (pid:291 rc=0)                                                                         │"
 "│                                        ││ SYS   102 (pid:291 rc=0)                                                                       │"
 "│                                        ││ SYS   104 (pid:291 rc=0)                                                                       │"
@@ -35,11 +34,11 @@ expression: render(&app)
 "│                                        ││ SYS   113 (pid:291 rc=0)                                                                       │"
 "│                                        ││ SYS   114 (pid:291 rc=0)                                                                       │"
 "│                                        ││ SYS   5 (pid:291 rc=0)                                                                         │"
-"│                                        ││ SYS   read (pid:291 rc=4096)                                                                   │"
-"│                                        ││ SYS   read (pid:291 rc=4096)                                                                   │"
+"│                                        ││ SYS   READ /etc/passwd (4096b) (pid:291 rc=4096)                                               │"
+"│                                        ││ SYS   READ /etc/passwd (4096b) (pid:291 rc=4096)                                               │"
 "│                                        ││ SYS   3 (pid:291 rc=0)                                                                         │"
 "│                                        ││ SYS   5 (pid:291 rc=0)                                                                         │"
-"│                                        ││ SYS   read (pid:291 rc=4096)                                                                   │"
-"│                                        ││ SYS   read (pid:291 rc=4096)                                                                   │"
+"│                                        ││ SYS   READ /etc/passwd (4096b) (pid:291 rc=4096)                                               │"
+"│                                        ││ SYS   READ /etc/passwd (4096b) (pid:291 rc=4096)                                               │"
 "└────────────────────────────────────────┘└────────────────────────────────────────────────────────────────────────────────────────────────┘"
 " 01_file_exploration.ndjson  │ 17164 events total │ Command 1/10 │ 13299 events │ ▶ History   j/k:nav  ⏎:expand  Tab:pane  1-5:tab  q:quit  "

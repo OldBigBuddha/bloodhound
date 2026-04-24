@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use chrono::{DateTime, FixedOffset, Utc};
 
 use crate::correlator::CommandGroup;
@@ -123,6 +125,10 @@ pub struct App {
     pub boot_time_utc: DateTime<Utc>,
     /// Timezone offset for display.
     pub tz_offset: FixedOffset,
+
+    /// (pid, fd) → filename mapping, built from successful `openat` return codes.
+    /// Used by `read`/`write` summaries to show the originating path instead of a bare fd.
+    pub fd_table: HashMap<(u32, u32), String>,
 }
 
 impl App {
@@ -134,6 +140,7 @@ impl App {
         file_path: String,
         boot_time_utc: DateTime<Utc>,
         tz_offset: FixedOffset,
+        fd_table: HashMap<(u32, u32), String>,
     ) -> Self {
         let total_events = events.len();
         let expanded = vec![false; commands.len()];
@@ -153,6 +160,7 @@ impl App {
             should_quit: false,
             boot_time_utc,
             tz_offset,
+            fd_table,
         }
     }
 
