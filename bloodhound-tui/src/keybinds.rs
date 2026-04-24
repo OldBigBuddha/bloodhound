@@ -18,6 +18,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Enter | KeyCode::Char(' ') => {
             if app.active_pane == crate::app::Pane::History {
                 app.toggle_expand();
+            } else if app.active_pane == crate::app::Pane::Detail
+                && app.active_tab == Tab::Process
+            {
+                app.toggle_process_expand();
             }
         }
 

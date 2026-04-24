@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, FixedOffset, Utc};
 
@@ -89,6 +89,19 @@ pub enum HistoryRow {
     Exec { group: usize, child: usize },
 }
 
+/// A row in the Process tab tree view.
+#[derive(Debug, Clone)]
+pub enum ProcessTreeRow {
+    /// Root node: an execve/clone event for a PID.
+    Root {
+        event_idx: usize,
+        has_children: bool,
+        is_expanded: bool,
+    },
+    /// Child node: a syscall event under a process root.
+    Child { event_idx: usize, is_last: bool },
+}
+
 /// Application state.
 pub struct App {
     /// Correlated command groups.
@@ -128,6 +141,9 @@ pub struct App {
     /// (pid, fd) → filename mapping, built from successful `openat` return codes.
     /// Used by `read`/`write` summaries to show the originating path instead of a bare fd.
     pub fd_table: HashMap<(u32, u32), String>,
+
+    /// Expanded process-root nodes (by event index) in the Process tab tree view.
+    pub process_expanded: HashSet<usize>,
 }
 
 impl App {
@@ -160,6 +176,7 @@ impl App {
             boot_time_utc,
             tz_offset,
             fd_table,
+            process_expanded: HashSet::new(),
         }
     }
 
@@ -215,6 +232,108 @@ impl App {
             .filter_map(|&idx| self.events.get(idx).map(|e| (idx, e)))
             .filter(|(_, e)| self.active_tab.matches(e.category()))
             .collect()
+    }
+
+    /// Build the Process-tab tree: group the current command's events by
+    /// PID, with execve/clone as the root node and every other non-hidden
+    /// syscall from the same PID as a child.
+    pub fn process_tree_rows(&self) -> Vec<ProcessTreeRow> {
+        let Some(group) = self.current_group() else {
+            return vec![];
+        };
+
+        let all_events: Vec<(usize, &BehaviorEvent)> = group
+            .event_indices
+            .iter()
+            .filter_map(|&idx| self.events.get(idx).map(|e| (idx, e)))
+            .filter(|(_, e)| e.category() != EventCategory::Hidden)
+            .collect();
+
+        let mut pid_order: Vec<u32> = Vec::new();
+        let mut pid_groups: HashMap<u32, Vec<(usize, &BehaviorEvent)>> = HashMap::new();
+        for (idx, event) in &all_events {
+            let pid = event.header.pid;
+            pid_groups
+                .entry(pid)
+                .or_insert_with(|| {
+                    pid_order.push(pid);
+                    Vec::new()
+                })
+                .push((*idx, *event));
+        }
+
+        let mut rows = Vec::new();
+        for pid in &pid_order {
+            let events = &pid_groups[pid];
+
+            let mut roots: Vec<(usize, &BehaviorEvent)> = Vec::new();
+            let mut children: Vec<(usize, &BehaviorEvent)> = Vec::new();
+            for (idx, event) in events {
+                match event.event.name.as_str() {
+                    "execve" | "execveat" | "clone" | "clone3" => roots.push((*idx, *event)),
+                    _ => children.push((*idx, *event)),
+                }
+            }
+
+            // PIDs without an execve/clone in the current window still get
+            // a root — promote the first event so the group is visible.
+            if roots.is_empty() && !children.is_empty() {
+                let first = children.remove(0);
+                roots.push(first);
+            }
+
+            for (root_idx, _) in &roots {
+                let is_expanded = self.process_expanded.contains(root_idx);
+                rows.push(ProcessTreeRow::Root {
+                    event_idx: *root_idx,
+                    has_children: !children.is_empty(),
+                    is_expanded,
+                });
+
+                if is_expanded {
+                    let last = children.len().saturating_sub(1);
+                    for (i, (child_idx, _)) in children.iter().enumerate() {
+                        rows.push(ProcessTreeRow::Child {
+                            event_idx: *child_idx,
+                            is_last: i == last,
+                        });
+                    }
+                }
+            }
+        }
+
+        rows
+    }
+
+    /// Expand/collapse the process root at the current `detail_scroll`.
+    /// When positioned on a child, collapse its parent and jump to it.
+    pub fn toggle_process_expand(&mut self) {
+        let rows = self.process_tree_rows();
+        let Some(row) = rows.get(self.detail_scroll) else {
+            return;
+        };
+        match row {
+            ProcessTreeRow::Root {
+                event_idx,
+                has_children,
+                ..
+            } => {
+                if *has_children {
+                    if !self.process_expanded.remove(event_idx) {
+                        self.process_expanded.insert(*event_idx);
+                    }
+                }
+            }
+            ProcessTreeRow::Child { .. } => {
+                for i in (0..self.detail_scroll).rev() {
+                    if let Some(ProcessTreeRow::Root { event_idx, .. }) = rows.get(i) {
+                        self.process_expanded.remove(event_idx);
+                        self.detail_scroll = i;
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     /// Toggle expand/collapse on the current row.

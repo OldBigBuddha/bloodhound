@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, HistoryRow, Pane, Tab};
+use crate::app::{App, HistoryRow, Pane, ProcessTreeRow, Tab};
 use crate::event_model::EventCategory;
 
 /// Primary color palette.
@@ -268,6 +268,11 @@ fn draw_detail_pane(f: &mut Frame, app: &App, area: Rect) {
 
     f.render_widget(tabs, chunks[0]);
 
+    if app.active_tab == Tab::Process {
+        draw_process_tree(f, app, chunks[1], border_color, is_active);
+        return;
+    }
+
     // Content: filtered events
     let detail_events = app.filtered_detail_events();
 
@@ -311,7 +316,9 @@ fn draw_detail_pane(f: &mut Frame, app: &App, area: Rect) {
             };
 
             let summary = event.summary_line(Some(&app.fd_table));
+            let ts = app.format_timestamp(event.header.timestamp);
             let line = Line::from(vec![
+                Span::styled(format!("{} ", ts), Style::default().fg(TIMESTAMP_COLOR)),
                 Span::styled(
                     format!(" {} ", tag),
                     Style::default()
@@ -345,6 +352,124 @@ fn draw_detail_pane(f: &mut Frame, app: &App, area: Rect) {
         );
 
     f.render_stateful_widget(list, chunks[1], &mut list_state);
+}
+
+fn draw_process_tree(
+    f: &mut Frame,
+    app: &App,
+    area: Rect,
+    border_color: Color,
+    is_active: bool,
+) {
+    let tree_rows = app.process_tree_rows();
+
+    if tree_rows.is_empty() {
+        let msg = if app.commands.is_empty() {
+            "No events loaded."
+        } else {
+            "No process events for the selected command."
+        };
+        let paragraph = Paragraph::new(msg)
+            .style(Style::default().fg(DIM_TEXT))
+            .block(
+                Block::default()
+                    .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+                    .border_style(Style::default().fg(border_color)),
+            )
+            .wrap(Wrap { trim: false });
+        f.render_widget(paragraph, area);
+        return;
+    }
+
+    let items: Vec<ListItem> = tree_rows
+        .iter()
+        .map(|row| match row {
+            ProcessTreeRow::Root {
+                event_idx,
+                has_children,
+                is_expanded,
+            } => {
+                let event = &app.events[*event_idx];
+                let arrow = if !has_children {
+                    "  "
+                } else if *is_expanded {
+                    "▾ "
+                } else {
+                    "▸ "
+                };
+                let summary = event.summary_line(Some(&app.fd_table));
+                let ts = app.format_timestamp(event.header.timestamp);
+                let line = Line::from(vec![
+                    Span::styled(format!("{} ", ts), Style::default().fg(TIMESTAMP_COLOR)),
+                    Span::styled(
+                        " PROC ",
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(PROCESS_COLOR)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(" "),
+                    Span::styled(arrow, Style::default().fg(DIM_TEXT)),
+                    Span::styled(summary, Style::default().fg(PROCESS_COLOR)),
+                ]);
+                ListItem::new(line)
+            }
+            ProcessTreeRow::Child { event_idx, is_last } => {
+                let event = &app.events[*event_idx];
+                let cat = event.category();
+                let color = match cat {
+                    EventCategory::Files => FILES_COLOR,
+                    EventCategory::Network => NETWORK_COLOR,
+                    EventCategory::Security => SECURITY_COLOR,
+                    EventCategory::Process => PROCESS_COLOR,
+                    EventCategory::Hidden => unreachable!(),
+                };
+                let tag = match cat {
+                    EventCategory::Files => "FILE",
+                    EventCategory::Network => "NET ",
+                    EventCategory::Security => "SEC ",
+                    EventCategory::Process => "PROC",
+                    EventCategory::Hidden => unreachable!(),
+                };
+                let branch = if *is_last { "  └─ " } else { "  ├─ " };
+                let summary = event.summary_line(Some(&app.fd_table));
+                let ts = app.format_timestamp(event.header.timestamp);
+                let line = Line::from(vec![
+                    Span::styled(format!("{} ", ts), Style::default().fg(TIMESTAMP_COLOR)),
+                    Span::styled(branch, Style::default().fg(DIM_TEXT)),
+                    Span::styled(
+                        format!(" {} ", tag),
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(color)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(" "),
+                    Span::styled(summary, Style::default().fg(color)),
+                ]);
+                ListItem::new(line)
+            }
+        })
+        .collect();
+
+    let mut list_state = ListState::default();
+    if is_active && !items.is_empty() {
+        list_state.select(Some(app.detail_scroll.min(items.len().saturating_sub(1))));
+    }
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+                .border_style(Style::default().fg(border_color)),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::Rgb(50, 55, 65))
+                .add_modifier(Modifier::BOLD),
+        );
+
+    f.render_stateful_widget(list, area, &mut list_state);
 }
 
 /// Draw the status bar at the bottom.
