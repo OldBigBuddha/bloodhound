@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::collections::HashMap;
 
 /// Syscall numbers (as string, since `event.name` is a string for
 /// Tier 1 `SYSCALL` events) that have a Tier 2 rich-extraction
@@ -102,24 +103,38 @@ pub struct ProcInfo {
 /// Event category for tab filtering in the detail pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventCategory {
-    Exec,
-    Syscall,
+    Process,
+    Security,
     Files,
     Network,
+    /// Events that should not appear in any tab (tty shown in Output pane,
+    /// raw Layer 2 syscalls are too low-level for user-facing display).
+    Hidden,
 }
 
 impl BehaviorEvent {
     /// Categorize this event for tab filtering.
     pub fn category(&self) -> EventCategory {
         match self.event.name.as_str() {
-            "execve" | "execveat" => EventCategory::Exec,
+            "execve" | "execveat" | "clone" | "clone3" => EventCategory::Process,
+
             "ingress" | "egress" | "connect" | "bind" | "listen" | "socket" | "sendto"
             | "recvfrom" => EventCategory::Network,
-            "openat" | "mkdir" | "mkdirat" | "rmdir" | "unlink" | "unlinkat" | "rename"
-            | "renameat2" | "symlink" | "symlinkat" | "link" | "linkat" | "chmod" | "fchmod"
-            | "fchmodat" | "chown" | "fchown" | "fchownat" | "truncate" | "ftruncate"
-            | "chdir" | "fchdir" | "mount" | "umount2" => EventCategory::Files,
-            _ => EventCategory::Syscall,
+
+            "openat" | "read" | "write" | "mkdir" | "mkdirat" | "rmdir" | "unlink"
+            | "unlinkat" | "rename" | "renameat2" | "symlink" | "symlinkat" | "link"
+            | "linkat" | "chmod" | "fchmod" | "fchmodat" | "chown" | "fchown" | "fchownat"
+            | "truncate" | "ftruncate" | "chdir" | "fchdir" | "mount" | "umount2"
+            | "file_open" | "inode_unlink" | "inode_rename" => EventCategory::Files,
+
+            "task_kill" | "bpf" | "ptrace_access_check" | "task_fix_setuid" => {
+                EventCategory::Security
+            }
+
+            "tty_read" | "tty_write" => EventCategory::Hidden,
+            _ if self.event.event_type == "SYSCALL" => EventCategory::Hidden,
+
+            _ => EventCategory::Security,
         }
     }
 
@@ -168,17 +183,21 @@ impl BehaviorEvent {
     }
 
     /// Format a one-line summary for display in the detail pane.
-    pub fn summary_line(&self) -> String {
-        let name = &self.event.name;
+    ///
+    /// File-related events use human-readable action labels (READ, WRITE,
+    /// CREATE, DELETE, RENAME, PERM, OWNER, MOUNT, …) instead of raw syscall
+    /// names. If `fd_table` is provided, `read`/`write` resolve their fd to
+    /// the originating path (built from prior `openat` events).
+    pub fn summary_line(&self, fd_table: Option<&HashMap<(u32, u32), String>>) -> String {
         let pid = self.header.pid;
         let rc = self
             .return_code
             .map(|r| format!(" rc={}", r))
             .unwrap_or_default();
 
-        let detail = match self.event.name.as_str() {
+        let (action, detail) = match self.event.name.as_str() {
             "execve" | "execveat" => {
-                if let Some(args) = &self.args {
+                let detail = if let Some(args) = &self.args {
                     let filename = args
                         .get("filename")
                         .and_then(|v| v.as_str())
@@ -196,49 +215,141 @@ impl BehaviorEvent {
                     format!(" {} [{}]", filename, argv)
                 } else {
                     String::new()
-                }
+                };
+                (self.event.name.as_str(), detail)
             }
+
+            "clone" | "clone3" => {
+                let detail = self
+                    .args
+                    .as_ref()
+                    .and_then(|a| a.get("flags"))
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join("|")
+                    })
+                    .filter(|s| !s.is_empty())
+                    .map(|s| format!(" ({})", s))
+                    .unwrap_or_default();
+                ("FORK", detail)
+            }
+
+            // openat → READ / WRITE based on flags.
             "openat" => {
                 if let Some(args) = &self.args {
                     let filename = args
                         .get("filename")
                         .and_then(|v| v.as_str())
                         .unwrap_or("?");
-                    let flags = args
+                    let empty = Vec::new();
+                    let flags: Vec<&str> = args
                         .get("flags")
                         .and_then(|v| v.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| v.as_str())
-                                .collect::<Vec<_>>()
-                                .join("|")
-                        })
-                        .unwrap_or_default();
-                    format!(" {} ({})", filename, flags)
+                        .unwrap_or(&empty)
+                        .iter()
+                        .filter_map(|v| v.as_str())
+                        .collect();
+                    let action = if flags.contains(&"O_WRONLY") || flags.contains(&"O_RDWR") {
+                        "WRITE"
+                    } else {
+                        "READ"
+                    };
+                    (action, format!(" {}", filename))
                 } else {
-                    String::new()
+                    ("OPEN", String::new())
                 }
             }
+
+            "read" => ("READ", self.format_rw_detail(fd_table)),
+            "write" => ("WRITE", self.format_rw_detail(fd_table)),
+
+            "mkdir" | "mkdirat" => ("CREATE", self.format_path_detail()),
+            "unlink" | "unlinkat" | "rmdir" => ("DELETE", self.format_path_detail()),
+            "rename" | "renameat2" => ("RENAME", self.format_two_path_detail()),
+            "symlink" | "symlinkat" | "link" | "linkat" => {
+                ("LINK", self.format_two_path_detail())
+            }
+            "chmod" | "fchmodat" => ("PERM", self.format_path_detail()),
+            "fchmod" => ("PERM", self.format_fd_detail()),
+            "chown" | "fchownat" => ("OWNER", self.format_path_detail()),
+            "fchown" => ("OWNER", self.format_fd_detail()),
+            "truncate" => ("TRUNC", self.format_path_detail()),
+            "ftruncate" => ("TRUNC", self.format_fd_detail()),
+            "chdir" => ("CHDIR", self.format_path_detail()),
+            "fchdir" => ("CHDIR", self.format_fd_detail()),
+            "mount" => ("MOUNT", self.format_two_path_detail()),
+            "umount2" => ("UMOUNT", self.format_path_detail()),
+
+            "file_open" => ("OPEN", " (LSM)".to_string()),
+            "inode_unlink" => ("DELETE", " (LSM)".to_string()),
+            "inode_rename" => ("RENAME", " (LSM)".to_string()),
+
+            "task_kill" => {
+                let detail = if let Some(args) = &self.args {
+                    let target = args.get("target_pid").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let sig = args.get("signal").and_then(|v| v.as_u64()).unwrap_or(0);
+                    format!(" pid={} sig={}", target, sig)
+                } else {
+                    String::new()
+                };
+                ("KILL", detail)
+            }
+            "bpf" => {
+                let detail = self
+                    .args
+                    .as_ref()
+                    .and_then(|a| a.get("cmd"))
+                    .and_then(|v| v.as_u64())
+                    .map(|c| format!(" cmd={}", c))
+                    .unwrap_or_default();
+                ("BPF", detail)
+            }
+            "ptrace_access_check" => {
+                let detail = self
+                    .args
+                    .as_ref()
+                    .and_then(|a| a.get("target_pid"))
+                    .and_then(|v| v.as_u64())
+                    .map(|p| format!(" pid={}", p))
+                    .unwrap_or_default();
+                ("PTRACE", detail)
+            }
+            "task_fix_setuid" => {
+                let detail = if let Some(args) = &self.args {
+                    let old_uid = args.get("old_uid").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let new_uid = args.get("new_uid").and_then(|v| v.as_u64()).unwrap_or(0);
+                    format!(" uid:{}→{}", old_uid, new_uid)
+                } else {
+                    String::new()
+                };
+                ("SETUID", detail)
+            }
+
             "connect" | "bind" | "sendto" | "recvfrom" => {
-                if let Some(args) = &self.args {
+                let detail = if let Some(args) = &self.args {
                     let addr = args.get("addr").and_then(|v| v.as_str()).unwrap_or("?");
                     let port = args.get("port").and_then(|v| v.as_u64()).unwrap_or(0);
                     format!(" {}:{}", addr, port)
                 } else {
                     String::new()
-                }
+                };
+                (self.event.name.as_str(), detail)
             }
             "ingress" | "egress" => {
-                if let Some(args) = &self.args {
+                let detail = if let Some(args) = &self.args {
                     let ifindex = args.get("ifindex").and_then(|v| v.as_u64()).unwrap_or(0);
                     format!(" if={}", ifindex)
                 } else {
                     String::new()
-                }
+                };
+                (self.event.name.as_str(), detail)
             }
+
             _ => {
-                // For file-related events, try to show filename
-                if let Some(args) = &self.args {
+                let detail = if let Some(args) = &self.args {
                     if let Some(filename) = args.get("filename").and_then(|v| v.as_str()) {
                         format!(" {}", filename)
                     } else {
@@ -246,11 +357,56 @@ impl BehaviorEvent {
                     }
                 } else {
                     String::new()
-                }
+                };
+                (self.event.name.as_str(), detail)
             }
         };
 
-        format!("{}{} (pid:{}{})", name, detail, pid, rc)
+        format!("{}{} (pid:{}{})", action, detail, pid, rc)
+    }
+
+    fn format_rw_detail(&self, fd_table: Option<&HashMap<(u32, u32), String>>) -> String {
+        let Some(args) = &self.args else {
+            return String::new();
+        };
+        let fd = args.get("fd").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let size = args
+            .get("requested_size")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        if let Some(table) = fd_table {
+            if let Some(path) = table.get(&(self.header.pid, fd)) {
+                return format!(" {} ({}b)", path, size);
+            }
+        }
+        format!(" fd={} ({}b)", fd, size)
+    }
+
+    fn format_path_detail(&self) -> String {
+        self.args
+            .as_ref()
+            .and_then(|a| a.get("filename"))
+            .and_then(|v| v.as_str())
+            .map(|f| format!(" {}", f))
+            .unwrap_or_default()
+    }
+
+    fn format_fd_detail(&self) -> String {
+        self.args
+            .as_ref()
+            .and_then(|a| a.get("fd"))
+            .and_then(|v| v.as_u64())
+            .map(|fd| format!(" fd={}", fd))
+            .unwrap_or_default()
+    }
+
+    fn format_two_path_detail(&self) -> String {
+        let Some(args) = &self.args else {
+            return String::new();
+        };
+        let old = args.get("oldpath").and_then(|v| v.as_str()).unwrap_or("?");
+        let new = args.get("newpath").and_then(|v| v.as_str()).unwrap_or("?");
+        format!(" {} → {}", old, new)
     }
 }
 
@@ -280,9 +436,11 @@ mod tests {
     }
 
     #[test]
-    fn test_category_exec() {
-        assert_eq!(make_event("TRACEPOINT", "execve").category(), EventCategory::Exec);
-        assert_eq!(make_event("TRACEPOINT", "execveat").category(), EventCategory::Exec);
+    fn test_category_process() {
+        assert_eq!(make_event("TRACEPOINT", "execve").category(), EventCategory::Process);
+        assert_eq!(make_event("TRACEPOINT", "execveat").category(), EventCategory::Process);
+        assert_eq!(make_event("TRACEPOINT", "clone").category(), EventCategory::Process);
+        assert_eq!(make_event("TRACEPOINT", "clone3").category(), EventCategory::Process);
     }
 
     #[test]
@@ -295,11 +453,24 @@ mod tests {
     fn test_category_files() {
         assert_eq!(make_event("TRACEPOINT", "openat").category(), EventCategory::Files);
         assert_eq!(make_event("TRACEPOINT", "mkdir").category(), EventCategory::Files);
+        assert_eq!(make_event("LSM", "file_open").category(), EventCategory::Files);
+        assert_eq!(make_event("LSM", "inode_unlink").category(), EventCategory::Files);
+        assert_eq!(make_event("LSM", "inode_rename").category(), EventCategory::Files);
     }
 
     #[test]
-    fn test_category_syscall() {
-        assert_eq!(make_event("SYSCALL", "42").category(), EventCategory::Syscall);
+    fn test_category_security() {
+        assert_eq!(make_event("LSM", "task_kill").category(), EventCategory::Security);
+        assert_eq!(make_event("LSM", "bpf").category(), EventCategory::Security);
+        assert_eq!(make_event("LSM", "ptrace_access_check").category(), EventCategory::Security);
+        assert_eq!(make_event("LSM", "task_fix_setuid").category(), EventCategory::Security);
+    }
+
+    #[test]
+    fn test_category_hidden() {
+        assert_eq!(make_event("TTY", "tty_read").category(), EventCategory::Hidden);
+        assert_eq!(make_event("TTY", "tty_write").category(), EventCategory::Hidden);
+        assert_eq!(make_event("SYSCALL", "42").category(), EventCategory::Hidden);
     }
 
     #[test]
@@ -314,7 +485,7 @@ mod tests {
         let event: BehaviorEvent = serde_json::from_str(json).unwrap();
         assert_eq!(event.header.pid, 1234);
         assert_eq!(event.event.name, "execve");
-        assert_eq!(event.category(), EventCategory::Exec);
+        assert_eq!(event.category(), EventCategory::Process);
     }
 
     #[test]
@@ -342,6 +513,120 @@ mod tests {
         assert!(!make_event("TRACEPOINT", "execve").is_synthetic());
         assert!(!make_event("SYSCALL", "231").is_synthetic());
         assert!(!make_event("TTY", "tty_read").is_synthetic());
+    }
+
+    fn make_event_with_args(name: &str, args: serde_json::Value) -> BehaviorEvent {
+        let mut e = make_event("TRACEPOINT", name);
+        e.args = Some(args);
+        e
+    }
+
+    #[test]
+    fn test_summary_openat_rdonly() {
+        let e = make_event_with_args(
+            "openat",
+            serde_json::json!({"filename":"/etc/passwd","flags":["O_RDONLY","O_CLOEXEC"],"mode":0}),
+        );
+        assert!(e.summary_line(None).starts_with("READ /etc/passwd"));
+    }
+
+    #[test]
+    fn test_summary_openat_wronly() {
+        let e = make_event_with_args(
+            "openat",
+            serde_json::json!({"filename":"/tmp/out.txt","flags":["O_WRONLY","O_CREAT"],"mode":420}),
+        );
+        assert!(e.summary_line(None).starts_with("WRITE /tmp/out.txt"));
+    }
+
+    #[test]
+    fn test_summary_read_fd_fallback() {
+        let e = make_event_with_args(
+            "read",
+            serde_json::json!({"fd":3,"fd_type":"regular","requested_size":4096}),
+        );
+        assert!(e.summary_line(None).starts_with("READ fd=3 (4096b)"));
+    }
+
+    #[test]
+    fn test_summary_write_fd_fallback() {
+        let e = make_event_with_args(
+            "write",
+            serde_json::json!({"fd":1,"fd_type":"tty","requested_size":256}),
+        );
+        assert!(e.summary_line(None).starts_with("WRITE fd=1 (256b)"));
+    }
+
+    #[test]
+    fn test_summary_read_with_fd_table() {
+        let mut fd_table = HashMap::new();
+        fd_table.insert((42u32, 3u32), "/etc/passwd".to_string());
+        let e = make_event_with_args(
+            "read",
+            serde_json::json!({"fd":3,"fd_type":"regular","requested_size":4096}),
+        );
+        assert!(e
+            .summary_line(Some(&fd_table))
+            .starts_with("READ /etc/passwd (4096b)"));
+    }
+
+    #[test]
+    fn test_summary_read_without_fd_table_match() {
+        let fd_table = HashMap::new();
+        let e = make_event_with_args(
+            "read",
+            serde_json::json!({"fd":99,"fd_type":"other","requested_size":512}),
+        );
+        assert!(e
+            .summary_line(Some(&fd_table))
+            .starts_with("READ fd=99 (512b)"));
+    }
+
+    #[test]
+    fn test_summary_file_actions() {
+        let cases = [
+            ("mkdir", serde_json::json!({"filename":"/tmp/d"}), "CREATE /tmp/d"),
+            ("unlink", serde_json::json!({"filename":"/tmp/x"}), "DELETE /tmp/x"),
+            ("rmdir", serde_json::json!({"filename":"/tmp/d"}), "DELETE /tmp/d"),
+            ("chmod", serde_json::json!({"filename":"/etc/c"}), "PERM /etc/c"),
+            ("fchmod", serde_json::json!({"fd":5}), "PERM fd=5"),
+            ("chown", serde_json::json!({"filename":"/var/log"}), "OWNER /var/log"),
+            ("truncate", serde_json::json!({"filename":"/tmp/l"}), "TRUNC /tmp/l"),
+            ("chdir", serde_json::json!({"filename":"/home/u"}), "CHDIR /home/u"),
+            ("umount2", serde_json::json!({"filename":"/mnt"}), "UMOUNT /mnt"),
+        ];
+        for (name, args, expected_prefix) in cases {
+            let e = make_event_with_args(name, args);
+            let s = e.summary_line(None);
+            assert!(
+                s.starts_with(expected_prefix),
+                "{} → {} (expected prefix {})",
+                name, s, expected_prefix
+            );
+        }
+    }
+
+    #[test]
+    fn test_summary_two_path_actions() {
+        let rename = make_event_with_args(
+            "rename",
+            serde_json::json!({"oldpath":"a.txt","newpath":"b.txt"}),
+        );
+        assert!(rename.summary_line(None).starts_with("RENAME a.txt → b.txt"));
+
+        let symlink = make_event_with_args(
+            "symlink",
+            serde_json::json!({"oldpath":"/usr/bin/python3","newpath":"/usr/bin/python"}),
+        );
+        assert!(symlink
+            .summary_line(None)
+            .starts_with("LINK /usr/bin/python3 → /usr/bin/python"));
+
+        let mount = make_event_with_args(
+            "mount",
+            serde_json::json!({"oldpath":"/dev/sda1","newpath":"/mnt"}),
+        );
+        assert!(mount.summary_line(None).starts_with("MOUNT /dev/sda1 → /mnt"));
     }
 
     #[test]

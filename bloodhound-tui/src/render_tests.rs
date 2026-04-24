@@ -112,22 +112,26 @@ fn detail_pane_excludes_lifecycle_and_heartbeat() {
         "03_process_lifecycle.ndjson should contain LIFECYCLE events",
     );
 
-    // Sweep the first 5 commands with the All tab to cover the widest
-    // filter. LIFECYCLE/HEARTBEAT are stripped globally, so one command
-    // would suffice — a small sweep catches edge cases like commands
-    // whose window happens to coincide with a heartbeat.
+    // Sweep the first 5 commands across every tab. LIFECYCLE/HEARTBEAT
+    // are stripped globally, so one command would suffice — a small
+    // sweep catches edge cases like commands whose window happens to
+    // coincide with a heartbeat.
     for gi in 0..app.commands.len().min(5) {
         app.history_cursor = gi;
-        app.set_tab(Tab::All);
-        let rendered = render(&app);
-        assert!(
-            !rendered.contains("LIFECYCLE"),
-            "command #{gi}: 'LIFECYCLE' leaked into the TUI",
-        );
-        assert!(
-            !rendered.contains("HEARTBEAT"),
-            "command #{gi}: 'HEARTBEAT' leaked into the TUI",
-        );
+        for &tab in &Tab::ALL_TABS {
+            app.set_tab(tab);
+            let rendered = render(&app);
+            assert!(
+                !rendered.contains("LIFECYCLE"),
+                "command #{gi} tab={:?}: 'LIFECYCLE' leaked into the TUI",
+                tab,
+            );
+            assert!(
+                !rendered.contains("HEARTBEAT"),
+                "command #{gi} tab={:?}: 'HEARTBEAT' leaked into the TUI",
+                tab,
+            );
+        }
     }
 }
 

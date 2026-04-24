@@ -198,6 +198,8 @@ pub(crate) fn build_app_from_path(
         }
     };
 
+    let fd_table = build_fd_table(&events);
+
     Ok(App::new(
         groups,
         events,
@@ -206,7 +208,34 @@ pub(crate) fn build_app_from_path(
         file_display,
         boot_time_utc,
         tz_offset,
+        fd_table,
     ))
+}
+
+/// Build (pid, fd) → filename mapping from successful `openat` events.
+/// Consumed by `summary_line` to resolve `read`/`write` fds back to paths.
+fn build_fd_table(events: &[BehaviorEvent]) -> std::collections::HashMap<(u32, u32), String> {
+    let mut table = std::collections::HashMap::new();
+    for event in events {
+        if event.event.name != "openat" {
+            continue;
+        }
+        let fd = match event.return_code {
+            Some(rc) if rc >= 0 => rc as u32,
+            _ => continue,
+        };
+        let filename = event
+            .args
+            .as_ref()
+            .and_then(|a| a.get("filename"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if !filename.is_empty() {
+            table.insert((event.header.pid, fd), filename);
+        }
+    }
+    table
 }
 
 fn run_tui(mut app: App) -> Result<()> {
