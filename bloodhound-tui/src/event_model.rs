@@ -116,7 +116,8 @@ impl BehaviorEvent {
     /// Categorize this event for tab filtering.
     pub fn category(&self) -> EventCategory {
         match self.event.name.as_str() {
-            "execve" | "execveat" | "clone" | "clone3" => EventCategory::Process,
+            "execve" | "execveat" | "clone" | "clone3" | "process_start" | "process_fork"
+            | "process_exit" => EventCategory::Process,
 
             "ingress" | "egress" | "connect" | "bind" | "listen" | "socket" | "sendto"
             | "recvfrom" => EventCategory::Network,
@@ -125,16 +126,20 @@ impl BehaviorEvent {
             | "unlinkat" | "rename" | "renameat2" | "symlink" | "symlinkat" | "link"
             | "linkat" | "chmod" | "fchmod" | "fchmodat" | "chown" | "fchown" | "fchownat"
             | "truncate" | "ftruncate" | "chdir" | "fchdir" | "mount" | "umount2"
-            | "file_open" | "inode_unlink" | "inode_rename" => EventCategory::Files,
+            | "mmap" | "dup" | "dup2" | "dup3" | "fcntl" | "pread64" | "pwrite64" | "readv"
+            | "writev" | "sendfile" | "splice" | "file_open" | "inode_unlink"
+            | "inode_rename" => EventCategory::Files,
 
             "task_kill" | "bpf" | "ptrace_access_check" | "task_fix_setuid" => {
                 EventCategory::Security
             }
 
-            "tty_read" | "tty_write" => EventCategory::Hidden,
+            "tty_read" | "tty_write" | "heartbeat" => EventCategory::Hidden,
             _ if self.event.event_type == "SYSCALL" => EventCategory::Hidden,
 
-            _ => EventCategory::Security,
+            // Unknown events are hidden rather than mislabeled as Security.
+            // Add explicit classifications above when new event names appear.
+            _ => EventCategory::Hidden,
         }
     }
 
@@ -441,6 +446,18 @@ mod tests {
         assert_eq!(make_event("TRACEPOINT", "execveat").category(), EventCategory::Process);
         assert_eq!(make_event("TRACEPOINT", "clone").category(), EventCategory::Process);
         assert_eq!(make_event("TRACEPOINT", "clone3").category(), EventCategory::Process);
+        assert_eq!(
+            make_event("LIFECYCLE", "process_start").category(),
+            EventCategory::Process,
+        );
+        assert_eq!(
+            make_event("LIFECYCLE", "process_fork").category(),
+            EventCategory::Process,
+        );
+        assert_eq!(
+            make_event("LIFECYCLE", "process_exit").category(),
+            EventCategory::Process,
+        );
     }
 
     #[test]
@@ -456,6 +473,17 @@ mod tests {
         assert_eq!(make_event("LSM", "file_open").category(), EventCategory::Files);
         assert_eq!(make_event("LSM", "inode_unlink").category(), EventCategory::Files);
         assert_eq!(make_event("LSM", "inode_rename").category(), EventCategory::Files);
+        // Rich-extraction events that previously fell through to Security.
+        for name in [
+            "mmap", "dup", "dup2", "dup3", "fcntl", "pread64", "pwrite64", "readv", "writev",
+            "sendfile", "splice",
+        ] {
+            assert_eq!(
+                make_event("TRACEPOINT", name).category(),
+                EventCategory::Files,
+                "{name} should be Files",
+            );
+        }
     }
 
     #[test]
@@ -471,6 +499,15 @@ mod tests {
         assert_eq!(make_event("TTY", "tty_read").category(), EventCategory::Hidden);
         assert_eq!(make_event("TTY", "tty_write").category(), EventCategory::Hidden);
         assert_eq!(make_event("SYSCALL", "42").category(), EventCategory::Hidden);
+        assert_eq!(
+            make_event("HEARTBEAT", "heartbeat").category(),
+            EventCategory::Hidden,
+        );
+        // Unknown event names fall through to Hidden, not Security.
+        assert_eq!(
+            make_event("TRACEPOINT", "some_future_event").category(),
+            EventCategory::Hidden,
+        );
     }
 
     #[test]
