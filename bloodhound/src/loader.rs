@@ -15,7 +15,6 @@ pub fn load_and_attach(args: &Cli) -> Result<aya::Ebpf> {
     let mut bpf = EbpfLoader::new()
         .set_global("TARGET_AUID", &args.uid, true)
         .set_global("DAEMON_PID", &std::process::id(), true)
-        .set_global("DROP_COUNT", &0u64, true)
         .load(aya::include_bytes_aligned!(concat!(
             env!("OUT_DIR"),
             "/bloodhound-ebpf/bpfel-unknown-none/release/bloodhound-ebpf"

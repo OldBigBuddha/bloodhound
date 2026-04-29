@@ -10,6 +10,14 @@ use bloodhound_common::*;
 #[map]
 pub static EVENTS: RingBuf = RingBuf::with_byte_size(RING_BUFFER_DEFAULT, 0);
 
+/// Cumulative ring buffer overflow count. One slot per CPU so BPF
+/// programs can increment without atomic ops or cross-CPU contention;
+/// userspace reads all slots and sums them. Replaces the previous
+/// `static mut DROP_COUNT: u64` global, which userspace never read
+/// back — see issue #28.
+#[map]
+pub static DROP_COUNT: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+
 // ── Syscall Entry Maps (enter/exit correlation) ──────────────────────────────
 
 /// Keyed by pid_tgid (u64). Stores execve entry data for sys_exit correlation.
