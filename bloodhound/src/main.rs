@@ -10,8 +10,8 @@ mod packet_correlator;
 mod serializer;
 mod shutdown;
 
-use anyhow::Result;
-use aya::maps::ring_buf::RingBuf;
+use anyhow::{Context, Result};
+use aya::maps::{ring_buf::RingBuf, PerCpuArray};
 use clap::Parser;
 use log::info;
 use std::sync::atomic::Ordering;
@@ -41,9 +41,24 @@ async fn main() -> Result<()> {
     let shutdown_tx = shutdown::shutdown_signal();
     let mut shutdown_rx = shutdown_tx.subscribe();
 
-    // Set up drop counter
+    // Set up drop counter and the BPF→userspace bridge that keeps it
+    // up to date. Without the bridge, the BPF helper increments a
+    // per-CPU map that nothing reads back, so the userspace counter
+    // (and therefore heartbeat `gap_detected`) stays at 0 forever
+    // — see issue #28.
     let drop_count = drop_counter::new_counter();
     tokio::spawn(drop_counter::poll_drop_counter(drop_count.clone()));
+
+    let drop_count_map = bpf
+        .take_map("DROP_COUNT")
+        .context("DROP_COUNT map not found in BPF object")?;
+    let drop_count_map: PerCpuArray<_, u64> = PerCpuArray::try_from(drop_count_map)?;
+    let bridge_reader = drop_counter::BpfDropCountReader::new(drop_count_map);
+    tokio::spawn(drop_counter::bridge_bpf_drop_counter(
+        bridge_reader,
+        drop_count.clone(),
+        Duration::from_secs(1),
+    ));
 
     // Set up ring buffer consumer
     let map = bpf.take_map("EVENTS").unwrap();
@@ -51,11 +66,8 @@ async fn main() -> Result<()> {
     let (event_tx, mut event_rx) = mpsc::channel::<Vec<u8>>(4096);
 
     // Spawn ring buffer consumer task
-    let consumer_drop_count = drop_count.clone();
     let consumer_handle = tokio::spawn(async move {
-        if let Err(e) =
-            consumer::consume_ring_buffer(ring_buf, event_tx, consumer_drop_count).await
-        {
+        if let Err(e) = consumer::consume_ring_buffer(ring_buf, event_tx).await {
             eprintln!("Ring buffer consumer error: {}", e);
         }
     });

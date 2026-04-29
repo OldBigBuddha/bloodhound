@@ -1,8 +1,10 @@
+[workspace]
+
 [package]
 name = "bloodhound-ebpf"
 version = "0.1.0"
 edition = "2021"
-license.workspace = true
+license = "Apache-2.0"
 
 [[bin]]
 name = "bloodhound-ebpf"
@@ -12,4 +14,17 @@ path = "src/main.rs"
 aya-ebpf = "0.1"
 aya-log-ebpf = "0.1"
 bloodhound-common = { path = "../bloodhound-common" }
+
+[profile.dev]
+panic = "abort"
+opt-level = 3
+debug = false
+debug-assertions = false
+overflow-checks = false
+codegen-units = 1
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
 

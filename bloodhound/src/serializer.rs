@@ -22,8 +22,10 @@ impl Serializer<io::Stdout> {
 }
 
 impl<W: Write> Serializer<W> {
-    /// Create a serializer writing to an arbitrary writer.
-    pub fn with_writer(writer: W) -> Self {
+    /// Create a serializer writing to an arbitrary writer. Test-only:
+    /// production wires `Serializer::new()` to `io::stdout()`.
+    #[cfg(test)]
+    fn with_writer(writer: W) -> Self {
         Self {
             writer: LineWriter::new(writer),
         }
