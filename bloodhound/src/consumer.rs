@@ -1,7 +1,6 @@
 use anyhow::Result;
 use aya::maps::ring_buf::RingBuf;
 use std::os::fd::AsRawFd;
-use std::sync::atomic::Ordering;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc;
 
