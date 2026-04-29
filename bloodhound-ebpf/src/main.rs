@@ -19,9 +19,6 @@ mod vmlinux;
 pub static mut TARGET_AUID: u32 = u32::MAX;
 
 #[no_mangle]
-pub static mut DROP_COUNT: u64 = 0;
-
-#[no_mangle]
 pub static mut DAEMON_PID: u32 = 0;
 
 // ── Panic Handler ────────────────────────────────────────────────────────────

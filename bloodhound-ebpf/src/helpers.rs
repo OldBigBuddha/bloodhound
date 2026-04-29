@@ -1,7 +1,7 @@
 use aya_ebpf::helpers::bpf_probe_read_user_str_bytes;
 use bloodhound_common::MAX_PATH_SIZE;
 
-use crate::maps::{EVENTS, SCRATCH_BUF};
+use crate::maps::{DROP_COUNT, EVENTS, SCRATCH_BUF};
 
 /// Read a user-space string into the per-CPU scratch buffer at the given index.
 /// Returns the number of bytes read (including null terminator), or 0 on failure.
@@ -34,11 +34,16 @@ pub unsafe fn emit_event(data: &[u8]) -> bool {
     }
 }
 
-/// Increment the global drop counter.
+/// Increment the per-CPU drop counter.
+///
+/// Uses `PerCpuArray<u64>` so each CPU writes to its own slot (no
+/// cross-CPU race). Userspace reads all slots and sums them via the
+/// drop-counter bridge (see `bloodhound::drop_counter`).
 #[inline(always)]
 pub unsafe fn increment_drop_count() {
-    let count = core::ptr::read_volatile(&raw const crate::DROP_COUNT);
-    core::ptr::write_volatile(&raw mut crate::DROP_COUNT, count.wrapping_add(1));
+    if let Some(ptr) = DROP_COUNT.get_ptr_mut(0) {
+        *ptr = (*ptr).wrapping_add(1);
+    }
 }
 
 /// Copy bytes between kernel memory regions using `bpf_probe_read_kernel` helper.
