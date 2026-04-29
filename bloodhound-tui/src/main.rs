@@ -200,16 +200,16 @@ pub(crate) fn build_app_from_path(
 
     let fd_table = build_fd_table(&events);
 
-    Ok(App::new(
-        groups,
+    Ok(App::new(crate::app::AppInit {
+        commands: groups,
         events,
         tty_output,
         exec_trees,
-        file_display,
+        file_path: file_display,
         boot_time_utc,
         tz_offset,
         fd_table,
-    ))
+    }))
 }
 
 /// Build (pid, fd) → filename mapping from successful `openat` events.
