@@ -37,11 +37,6 @@ use serde_json::json;
 
 use crate::deserializer::{BehaviorEvent, EventHeaderJson, EventTypeJson};
 
-/// Linux `CLONE_THREAD` bit — set when the clone creates a thread
-/// rather than a new process. We skip `process_fork` synthesis for
-/// thread clones; they are not a new address-space identity.
-const CLONE_THREAD: u64 = 0x0001_0000;
-
 /// Syscall number for `exit_group` on x86_64. Used to detect process
 /// termination in Tier 1 raw-syscall events (where `event.name` is the
 /// syscall number rendered as a string).

@@ -292,7 +292,7 @@ mod tests {
     #[test]
     fn record_event_with_bad_addr_does_not_panic() {
         let mut correlator = PacketCorrelator::new(1000);
-        let mut event = make_connect_event("not_an_ip", 80);
+        let event = make_connect_event("not_an_ip", 80);
         correlator.record_socket(&event); // Should silently return
         assert_eq!(correlator.table.len(), 0);
     }
