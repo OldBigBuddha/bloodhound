@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["bloodhound", "bloodhound-common", "bloodhound-ebpf", "bloodhound-tui"]
+members = ["bloodhound", "bloodhound-common", "bloodhound-tui"]
+# bloodhound-ebpf is intentionally excluded: it builds for bpfel-unknown-none
+# via aya-build (see bloodhound/build.rs) and lives in its own workspace so
+# rust-analyzer can analyze it under the bpf target.
 
 [workspace.package]
 license = "Apache-2.0"
@@ -10,13 +13,6 @@ bloodhound-common = { path = "bloodhound-common" }
 
 [profile.dev]
 panic = "abort"
-
-[profile.dev.package.bloodhound-ebpf]
-opt-level = 3
-debug = false
-debug-assertions = false
-overflow-checks = false
-codegen-units = 1
 
 [profile.release]
 lto = true

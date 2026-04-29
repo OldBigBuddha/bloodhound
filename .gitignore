@@ -10,6 +10,9 @@ target/
 # Backup files
 *.bak
 
+# rustc internal compiler error reports
+rustc-ice-*.txt
+
 # Python
 __pycache__/
 .pytest_cache/
