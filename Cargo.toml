@@ -11,6 +11,12 @@ license = "Apache-2.0"
 [workspace.dependencies]
 bloodhound-common = { path = "bloodhound-common" }
 
+[workspace.lints.clippy]
+# Forbid reinterpret-casting `*const u8` to `*const T` where align(T) > 1.
+# The deserializer reads BPF wire bytes from `Vec<u8>` whose alignment is
+# only guaranteed to be 1; use `core::ptr::read_unaligned` instead.
+cast_ptr_alignment = "deny"
+
 [profile.dev]
 panic = "abort"
 

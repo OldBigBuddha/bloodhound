@@ -68,7 +68,7 @@ fn deserialize_process_event(data: &[u8], kind: EventKind) -> Result<BehaviorEve
         bail!("Event data too short for header");
     }
 
-    let header = unsafe { &*(data.as_ptr() as *const EventHeader) };
+    let header = unsafe { core::ptr::read_unaligned(data.as_ptr() as *const EventHeader) };
     let payload = &data[EventHeader::SIZE..];
 
     let header_json = EventHeaderJson {
@@ -159,7 +159,7 @@ fn deserialize_packet(data: &[u8]) -> Result<BehaviorEvent> {
         bail!("Packet event data too short");
     }
 
-    let pkt_header = unsafe { &*(data.as_ptr() as *const PacketEventHeader) };
+    let pkt_header = unsafe { core::ptr::read_unaligned(data.as_ptr() as *const PacketEventHeader) };
     let pkt_data = &data[PacketEventHeader::SIZE..];
 
     let name = if pkt_header.kind == EventKind::PacketIngress as u8 {
@@ -203,7 +203,7 @@ fn parse_tty(payload: &[u8], name: &str) -> Result<(String, String, String, Opti
     if payload.len() < TtyPayload::SIZE {
         bail!("TTY payload too short");
     }
-    let tty = unsafe { &*(payload.as_ptr() as *const TtyPayload) };
+    let tty = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const TtyPayload) };
     let data_start = TtyPayload::SIZE;
     let data_len = (tty.data_len as usize).min(payload.len() - data_start);
     let raw_data = &payload[data_start..data_start + data_len];
@@ -217,7 +217,7 @@ fn parse_execve(payload: &[u8], name: &str) -> Result<(String, String, String, O
     if payload.len() < ExecvePayload::SIZE {
         bail!("Execve payload too short");
     }
-    let execve = unsafe { &*(payload.as_ptr() as *const ExecvePayload) };
+    let execve = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const ExecvePayload) };
     let var_data = &payload[ExecvePayload::SIZE..];
 
     let filename_len = (execve.filename_len as usize).min(var_data.len());
@@ -246,7 +246,7 @@ fn parse_raw_syscall(payload: &[u8]) -> Result<(String, String, String, Option<s
     if payload.len() < RawSyscallPayload::SIZE {
         bail!("Raw syscall payload too short");
     }
-    let raw = unsafe { &*(payload.as_ptr() as *const RawSyscallPayload) };
+    let raw = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const RawSyscallPayload) };
 
     let args = serde_json::json!({
         "syscall_nr": raw.syscall_nr,
@@ -266,7 +266,7 @@ fn parse_openat(payload: &[u8]) -> Result<(String, String, String, Option<serde_
     if payload.len() < OpenatPayload::SIZE {
         bail!("Openat payload too short");
     }
-    let openat = unsafe { &*(payload.as_ptr() as *const OpenatPayload) };
+    let openat = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const OpenatPayload) };
     let var_data = &payload[OpenatPayload::SIZE..];
     let filename_len = (openat.filename_len as usize).min(var_data.len());
     let filename = extract_string(&var_data[..filename_len]);
@@ -299,7 +299,7 @@ fn parse_read_write(payload: &[u8], name: &str) -> Result<(String, String, Strin
     if payload.len() < ReadWritePayload::SIZE {
         bail!("ReadWrite payload too short");
     }
-    let rw = unsafe { &*(payload.as_ptr() as *const ReadWritePayload) };
+    let rw = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const ReadWritePayload) };
 
     let fd_type_str = match rw.fd_type {
         FD_TYPE_REGULAR => "regular",
@@ -328,7 +328,7 @@ fn parse_connect_bind(payload: &[u8], name: &str) -> Result<(String, String, Str
     if payload.len() < ConnectBindPayload::SIZE {
         bail!("ConnectBind payload too short");
     }
-    let cb = unsafe { &*(payload.as_ptr() as *const ConnectBindPayload) };
+    let cb = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const ConnectBindPayload) };
 
     let addr = if cb.family == 2 {
         format_ipv4(cb.addr_v4)
@@ -357,7 +357,7 @@ fn parse_listen(payload: &[u8]) -> Result<(String, String, String, Option<serde_
     if payload.len() < ListenPayload::SIZE {
         bail!("Listen payload too short");
     }
-    let listen = unsafe { &*(payload.as_ptr() as *const ListenPayload) };
+    let listen = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const ListenPayload) };
 
     let args = serde_json::json!({
         "fd": listen.fd,
@@ -377,7 +377,7 @@ fn parse_socket(payload: &[u8]) -> Result<(String, String, String, Option<serde_
     if payload.len() < SocketPayload::SIZE {
         bail!("Socket payload too short");
     }
-    let sock = unsafe { &*(payload.as_ptr() as *const SocketPayload) };
+    let sock = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const SocketPayload) };
 
     let args = serde_json::json!({
         "domain": sock.domain,
@@ -398,7 +398,7 @@ fn parse_clone(payload: &[u8], name: &str) -> Result<(String, String, String, Op
     if payload.len() < ClonePayload::SIZE {
         bail!("Clone payload too short");
     }
-    let clone = unsafe { &*(payload.as_ptr() as *const ClonePayload) };
+    let clone = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const ClonePayload) };
 
     let flags = decode_clone_flags(clone.flags);
     let args = serde_json::json!({
@@ -418,7 +418,7 @@ fn parse_path_event(payload: &[u8], name: &str) -> Result<(String, String, Strin
     if payload.len() < PathPayload::SIZE {
         bail!("Path payload too short");
     }
-    let path = unsafe { &*(payload.as_ptr() as *const PathPayload) };
+    let path = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const PathPayload) };
     let var_data = &payload[PathPayload::SIZE..];
     let path_len = (path.path_len as usize).min(var_data.len());
     let filename = extract_string(&var_data[..path_len]);
@@ -440,7 +440,7 @@ fn parse_fd_event(payload: &[u8], name: &str) -> Result<(String, String, String,
     if payload.len() < FdPayload::SIZE {
         bail!("Fd payload too short");
     }
-    let fd = unsafe { &*(payload.as_ptr() as *const FdPayload) };
+    let fd = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const FdPayload) };
 
     let args = serde_json::json!({
         "fd": fd.fd,
@@ -459,7 +459,7 @@ fn parse_two_path_event(payload: &[u8], name: &str) -> Result<(String, String, S
     if payload.len() < TwoPathPayload::SIZE {
         bail!("TwoPath payload too short");
     }
-    let tp = unsafe { &*(payload.as_ptr() as *const TwoPathPayload) };
+    let tp = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const TwoPathPayload) };
     let var_data = &payload[TwoPathPayload::SIZE..];
 
     let p1_len = (tp.path1_len as usize).min(var_data.len());
@@ -487,7 +487,7 @@ fn parse_sendto_recvfrom(payload: &[u8], name: &str) -> Result<(String, String, 
     if payload.len() < SendtoRecvfromPayload::SIZE {
         bail!("SendtoRecvfrom payload too short");
     }
-    let sr = unsafe { &*(payload.as_ptr() as *const SendtoRecvfromPayload) };
+    let sr = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const SendtoRecvfromPayload) };
 
     let addr = if sr.family == 2 {
         format_ipv4(sr.addr_v4)
@@ -521,7 +521,7 @@ fn parse_dup(
     if payload.len() < DupPayload::SIZE {
         bail!("Dup payload too short");
     }
-    let d = unsafe { &*(payload.as_ptr() as *const DupPayload) };
+    let d = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const DupPayload) };
 
     let args = serde_json::json!({
         "oldfd": d.oldfd,
@@ -545,7 +545,7 @@ fn parse_pread_pwrite(
     if payload.len() < PreadPwritePayload::SIZE {
         bail!("PreadPwrite payload too short");
     }
-    let p = unsafe { &*(payload.as_ptr() as *const PreadPwritePayload) };
+    let p = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const PreadPwritePayload) };
 
     let fd_type_str = match p.fd_type {
         FD_TYPE_REGULAR => "regular",
@@ -578,7 +578,7 @@ fn parse_readv_writev(
     if payload.len() < ReadvWritevPayload::SIZE {
         bail!("ReadvWritev payload too short");
     }
-    let p = unsafe { &*(payload.as_ptr() as *const ReadvWritevPayload) };
+    let p = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const ReadvWritevPayload) };
 
     let fd_type_str = match p.fd_type {
         FD_TYPE_REGULAR => "regular",
@@ -611,7 +611,7 @@ fn parse_mmap(
     if payload.len() < MmapPayload::SIZE {
         bail!("Mmap payload too short");
     }
-    let p = unsafe { &*(payload.as_ptr() as *const MmapPayload) };
+    let p = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const MmapPayload) };
 
     let mut args = serde_json::json!({
         "fd": p.fd,
@@ -642,7 +642,7 @@ fn parse_sendfile_splice(
     if payload.len() < SendfileSplicePayload::SIZE {
         bail!("SendfileSplice payload too short");
     }
-    let p = unsafe { &*(payload.as_ptr() as *const SendfileSplicePayload) };
+    let p = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const SendfileSplicePayload) };
 
     let in_type = fd_type_to_str(p.in_fd_type);
     let out_type = fd_type_to_str(p.out_fd_type);
@@ -676,7 +676,7 @@ fn fd_type_to_str(t: u8) -> &'static str {
 
 fn parse_lsm_simple(payload: &[u8], name: &str) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
     let return_code = if payload.len() >= 8 {
-        let p = unsafe { &*(payload.as_ptr() as *const LsmFileOpenPayload) };
+        let p = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const LsmFileOpenPayload) };
         Some(p.return_code as i64)
     } else {
         None
@@ -695,7 +695,7 @@ fn parse_lsm_task_kill(payload: &[u8]) -> Result<(String, String, String, Option
     if payload.len() < LsmTaskKillPayload::SIZE {
         bail!("LSM task_kill payload too short");
     }
-    let tk = unsafe { &*(payload.as_ptr() as *const LsmTaskKillPayload) };
+    let tk = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const LsmTaskKillPayload) };
 
     let args = serde_json::json!({
         "target_pid": tk.target_pid,
@@ -715,7 +715,7 @@ fn parse_lsm_bpf(payload: &[u8]) -> Result<(String, String, String, Option<serde
     if payload.len() < LsmBpfPayload::SIZE {
         bail!("LSM bpf payload too short");
     }
-    let bpf = unsafe { &*(payload.as_ptr() as *const LsmBpfPayload) };
+    let bpf = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const LsmBpfPayload) };
 
     let args = serde_json::json!({
         "cmd": bpf.cmd,
@@ -734,7 +734,7 @@ fn parse_lsm_ptrace(payload: &[u8]) -> Result<(String, String, String, Option<se
     if payload.len() < LsmPtracePayload::SIZE {
         bail!("LSM ptrace payload too short");
     }
-    let pt = unsafe { &*(payload.as_ptr() as *const LsmPtracePayload) };
+    let pt = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const LsmPtracePayload) };
 
     let args = serde_json::json!({
         "target_pid": pt.target_pid,
@@ -753,7 +753,7 @@ fn parse_lsm_setuid(payload: &[u8]) -> Result<(String, String, String, Option<se
     if payload.len() < LsmSetuidPayload::SIZE {
         bail!("LSM setuid payload too short");
     }
-    let su = unsafe { &*(payload.as_ptr() as *const LsmSetuidPayload) };
+    let su = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const LsmSetuidPayload) };
 
     let args = serde_json::json!({
         "old_uid": su.old_uid,
@@ -1907,5 +1907,70 @@ mod golden_tests {
 
         let event = deserialize(&buf).unwrap();
         assert_json_snapshot!("packet_ingress", to_json(&event));
+    }
+
+    // ── Alignment-independence regression test ───────────────────────────
+    //
+    // The deserializer must accept any `&[u8]` regardless of the underlying
+    // pointer's alignment. The wire types contain `u64` fields and therefore
+    // demand 8-byte alignment if read by reference; this test feeds them a
+    // 1-byte-aligned slice to exercise the `read_unaligned` paths and pin
+    // the contract. On x86_64 ordinary loads tolerate misalignment, so this
+    // test passes silently under `cargo test`; its real value is under miri,
+    // which flags every reference deref of an under-aligned pointer as UB.
+
+    /// Wrap `bytes` so that the returned slice begins one byte past a
+    /// glibc-malloc-aligned (≥ 8) base, guaranteeing odd alignment.
+    fn unaligned(bytes: &[u8]) -> Vec<u8> {
+        let mut padded = Vec::with_capacity(bytes.len() + 1);
+        padded.push(0xAA); // sacrificial prefix byte
+        padded.extend_from_slice(bytes);
+        padded
+    }
+
+    #[test]
+    fn deserialize_tolerates_unaligned_buffer_process_event() {
+        let payload = RawSyscallPayload {
+            syscall_nr: 100,
+            args: [1, 2, 3, 4, 5, 6],
+            return_code: -1,
+        };
+        let aligned = build(EventKind::RawSyscall, &payload_bytes(&payload));
+        let padded = unaligned(&aligned);
+        // sanity: the slice we pass really is 1-byte aligned
+        assert_eq!((padded[1..].as_ptr() as usize) % 8, 1);
+
+        let event = deserialize(&padded[1..]).unwrap();
+        assert_eq!(event.event.event_type, "SYSCALL");
+        assert_eq!(event.event.name, "100");
+        assert_eq!(event.return_code, Some(-1));
+        assert_eq!(event.header.pid, 5678);
+    }
+
+    #[test]
+    fn deserialize_tolerates_unaligned_buffer_packet_event() {
+        let pkt_header = PacketEventHeader {
+            kind: EventKind::PacketEgress as u8,
+            _pad: [0; 3],
+            timestamp_ns: 5_000_000_000,
+            ifindex: 7,
+            data_len: 2,
+        };
+        let mut aligned = unsafe {
+            std::slice::from_raw_parts(
+                &pkt_header as *const PacketEventHeader as *const u8,
+                PacketEventHeader::SIZE,
+            )
+        }
+        .to_vec();
+        aligned.extend_from_slice(&[0xAB, 0xCD]);
+
+        let padded = unaligned(&aligned);
+        assert_eq!((padded[1..].as_ptr() as usize) % 8, 1);
+
+        let event = deserialize(&padded[1..]).unwrap();
+        assert_eq!(event.event.event_type, "PACKET");
+        assert_eq!(event.event.name, "egress");
+        assert!((event.header.timestamp - 5.0).abs() < 1e-9);
     }
 }

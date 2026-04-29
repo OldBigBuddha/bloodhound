@@ -9,3 +9,6 @@ default = []
 user = []
 
 [dependencies]
+
+[lints]
+workspace = true
